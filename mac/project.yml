@@ -1,0 +1,51 @@
+name: Friday
+options:
+  bundleIdPrefix: com.friday
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: YES
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    from: "2.0.0"
+targets:
+  Friday:
+    type: application
+    platform: macOS
+    sources:
+      - path: Friday
+    info:
+      path: Friday/Info.plist
+      properties:
+        CFBundleDisplayName: Friday
+        CFBundleName: Friday
+        CFBundleIdentifier: com.friday.menubar
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        NSMicrophoneUsageDescription: "Friday listens for the wake word and your spoken requests."
+        NSHighResolutionCapable: true
+    entitlements:
+      path: Friday/Friday.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    dependencies:
+      - package: LiveKit
+        product: LiveKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.friday.menubar
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO

@@ -1,0 +1,18 @@
+.claude
+.env
+.env.local
+.env*
+
+CLAUDE.md
+AGENTS.md
+todos.md
+
+__pycache__/
+uv.lock
+
+# Local/generated Xcode and SwiftPM build output.
+mac/build/
+mac/DerivedData/
+mac/Friday.xcodeproj/project.xcworkspace/
+mac/Friday.xcodeproj/xcuserdata/
+*.xcuserstate
