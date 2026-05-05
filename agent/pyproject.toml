@@ -1,0 +1,12 @@
+[project]
+name = "friday-agent"
+version = "0.1.0"
+description = "Friday voice assistant — LiveKit Cloud agent"
+requires-python = ">=3.11"
+dependencies = [
+    "livekit-agents[deepgram,anthropic,silero]~=1.2",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.uv]
+package = false
