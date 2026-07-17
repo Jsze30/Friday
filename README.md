@@ -83,7 +83,7 @@ Main files:
   handlers, controls the microphone, and forwards local tool/profile RPCs.
 
 Important implementation detail: `LocalServiceProcess.swift` currently contains
-hard-coded paths pointing at `/Users/jas/Documents/Coding/friday2/local_service`.
+hard-coded paths pointing at `/Users/jas/Documents/Coding/friday/local_service`.
 If this repository is checked out elsewhere, update `workingDir` and
 `pythonPath` before running the app.
 

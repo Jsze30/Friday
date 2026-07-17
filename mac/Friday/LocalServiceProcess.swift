@@ -4,8 +4,8 @@ import Foundation
 final class LocalServiceProcess {
     static let shared = LocalServiceProcess()
 
-    private let workingDir = "/Users/jas/Documents/Coding/friday2/local_service"
-    private let pythonPath = "/Users/jas/Documents/Coding/friday2/local_service/.venv/bin/python"
+    private let workingDir = "/Users/jas/Documents/Coding/friday/local_service"
+    private let pythonPath = "/Users/jas/Documents/Coding/friday/local_service/.venv/bin/python"
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
