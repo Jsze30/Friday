@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
-from vosk import KaldiRecognizer, Model, SetLogLevel
+from openwakeword.model import Model
 
 from .config import settings
 from .events import bus
 
 log = logging.getLogger("friday.wake")
-SetLogLevel(-1)
 
 SAMPLE_RATE = 16000
-BLOCKSIZE = 4000  # 250 ms
+BLOCKSIZE = 1280  # 80 ms — openWakeWord's expected frame size
 
 
 class WakeDetector:
-    """Runs Vosk on a background thread reading from sounddevice.
+    """Runs openWakeWord on a background thread reading from sounddevice.
 
-    Paused state stops processing audio (mic stream stays open to avoid
+    Paused state stops scoring audio (mic stream stays open to avoid
     re-acquiring the device) — Swift pauses while LiveKit owns the mic.
     """
 
@@ -34,11 +34,13 @@ class WakeDetector:
         self._paused = threading.Event()
         self._last_fire_ms = 0.0
 
-        model_path = settings.resolved_vosk_model_path()
-        if not model_path.exists():
-            raise FileNotFoundError(f"Vosk model not found: {model_path}")
-        log.info("loading vosk model: %s", model_path)
-        self._model = Model(str(model_path))
+        model_ref = settings.resolved_wake_model()
+        if ("/" in model_ref) and not Path(model_ref).exists():
+            raise FileNotFoundError(f"Wake model not found: {model_ref}")
+        log.info("loading openwakeword model: %s", model_ref)
+        # Explicit onnx: tflite-runtime has no Apple Silicon wheels, and letting
+        # openWakeWord discover that itself logs a warning on every start.
+        self._model = Model(wakeword_models=[model_ref], inference_framework="onnx")
 
     def start(self) -> None:
         if self._thread is not None:
@@ -57,6 +59,9 @@ class WakeDetector:
         self._paused.set()
 
     def resume(self) -> None:
+        # Clear buffered audio features before unpausing so speech from the
+        # just-ended turn can't score against the wake model.
+        self._model.reset()
         self._paused.clear()
 
     @property
@@ -64,10 +69,6 @@ class WakeDetector:
         return self._paused.is_set()
 
     def _run(self) -> None:
-        grammar = json.dumps([settings.wake_phrase, "[unk]"])
-        recognizer = KaldiRecognizer(self._model, SAMPLE_RATE, grammar)
-        recognizer.SetWords(True)
-
         try:
             with sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -79,20 +80,17 @@ class WakeDetector:
                 while not self._stop.is_set():
                     data, _ = stream.read(BLOCKSIZE)
                     if self._paused.is_set():
-                        recognizer.Reset()
                         continue
-                    if recognizer.AcceptWaveform(bytes(data)):
-                        result = json.loads(recognizer.Result())
-                        self._maybe_fire(result, final=True)
-                    else:
-                        partial = json.loads(recognizer.PartialResult())
-                        self._maybe_fire(partial, final=False)
+                    frame = np.frombuffer(bytes(data), dtype=np.int16)
+                    self._maybe_fire(self._model.predict(frame))
         except Exception:
             log.exception("wake detector crashed")
 
-    def _maybe_fire(self, result: dict, *, final: bool) -> None:
-        text = (result.get("text") or result.get("partial") or "").strip().lower()
-        if not text or settings.wake_phrase not in text.split():
+    def _maybe_fire(self, scores: dict[str, float]) -> None:
+        if not scores:
+            return
+        name, score = max(scores.items(), key=lambda kv: kv[1])
+        if score < settings.wake_threshold:
             return
 
         now_ms = time.monotonic() * 1000
@@ -100,17 +98,11 @@ class WakeDetector:
             return
         self._last_fire_ms = now_ms
 
-        confidence: float | None = None
-        for w in result.get("result", []):
-            if w.get("word") == settings.wake_phrase:
-                confidence = float(w.get("conf", 0.0))
-                break
-
         event = {
             "type": "wake_detected",
-            "phrase": settings.wake_phrase,
+            "phrase": name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "confidence": confidence,
+            "confidence": float(score),
         }
-        log.info("wake fired: final=%s conf=%s text=%r", final, confidence, text)
+        log.info("wake fired: model=%s score=%.3f", name, score)
         self._loop.call_soon_threadsafe(bus.publish, event)

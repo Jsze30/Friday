@@ -23,16 +23,19 @@ class Settings(BaseSettings):
     room_prefix: str = Field(default="friday", alias="FRIDAY_ROOM_PREFIX")
     token_ttl_seconds: int = Field(default=600, alias="FRIDAY_TOKEN_TTL_SECONDS")
 
-    vosk_model_path: Path = Field(
-        default=Path("models/vosk-model-small-en-us-0.15"),
-        alias="FRIDAY_VOSK_MODEL_PATH",
-    )
-    wake_phrase: str = Field(default="friday", alias="FRIDAY_WAKE_PHRASE")
+    # openWakeWord: either a pretrained model name ("hey_jarvis", "alexa",
+    # "hey_mycroft", "hey_rhasspy") or a path to a custom-trained .onnx.
+    wake_model: str = Field(default="hey_jarvis", alias="FRIDAY_WAKE_MODEL")
+    wake_threshold: float = Field(default=0.5, alias="FRIDAY_WAKE_THRESHOLD")
     wake_debounce_ms: int = Field(default=1500, alias="FRIDAY_WAKE_DEBOUNCE_MS")
 
-    def resolved_vosk_model_path(self) -> Path:
-        p = self.vosk_model_path
-        return p if p.is_absolute() else REPO_ROOT / p
+    def resolved_wake_model(self) -> str:
+        """Pretrained model name as-is, or a custom model path made absolute."""
+        v = self.wake_model.strip()
+        if v.endswith((".onnx", ".tflite")) or "/" in v:
+            p = Path(v)
+            return str(p if p.is_absolute() else REPO_ROOT / p)
+        return v
 
 
 settings = Settings()  # type: ignore[call-arg]
