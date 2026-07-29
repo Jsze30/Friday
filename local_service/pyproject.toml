@@ -1,7 +1,7 @@
 [project]
 name = "friday-local-service"
 version = "0.1.0"
-description = "Friday local helper — wake detection, LiveKit token signing, local events API"
+description = "Friday local helper - LiveKit token signing, tool registry, local events API"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -9,14 +9,19 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "livekit-api>=0.8",
-    "vosk==0.3.44",
-    "sounddevice>=0.5",
     "numpy>=1.26",
+    "openwakeword>=0.6.0",
     "python-dotenv>=1.0",
     "google-api-python-client>=2.140",
     "google-auth>=2.34",
     "google-auth-oauthlib>=1.2",
-    "openwakeword>=0.6.0",
+]
+
+# sounddevice is only used by scripts/wake_monitor.py for validating candidate
+# wake models against the raw microphone.
+[dependency-groups]
+dev = [
+    "sounddevice>=0.5",
 ]
 
 [tool.uv]

@@ -24,7 +24,7 @@ final class BootCoordinator {
 
             try await c.health()
             let token = try await c.mintToken()
-            try await liveKit.connect(token: token)
+            try await liveKit.connect(token: token, servicePort: port)
 
             // Subscribe to local_service events.
             eventTask = c.openEventStream(
@@ -34,9 +34,11 @@ final class BootCoordinator {
                           let type = obj["type"] as? String else { return }
                     switch type {
                     case "wake_detected":
+                        let confidence = obj["confidence"] as? Double ?? 0
                         Task { @MainActor in
-                            try? await c.pauseWake()
-                            self.liveKit.handleWakeDetected()
+                            self.liveKit.handleWakeDetected(
+                                confidence: Float(confidence)
+                            )
                         }
                     case "profile_updated":
                         Task { @MainActor in

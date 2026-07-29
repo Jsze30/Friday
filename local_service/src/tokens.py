@@ -20,6 +20,7 @@ def mint_token() -> dict[str, str | int]:
         can_publish=True,
         can_subscribe=True,
         can_publish_data=True,
+        can_update_own_metadata=True,
     )
 
     room_config = api.RoomConfiguration(

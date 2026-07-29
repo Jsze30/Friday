@@ -16,3 +16,6 @@ mac/DerivedData/
 mac/Friday.xcodeproj/project.xcworkspace/
 mac/Friday.xcodeproj/xcuserdata/
 *.xcuserstate
+
+# Local wake-word training data, environments, and generated outputs.
+wake_training/

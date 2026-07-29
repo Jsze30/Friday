@@ -71,10 +71,8 @@ final class LocalServiceProcess {
 
     func stop() {
         guard let p = process, p.isRunning else { return }
-        // Python is a direct child now, so SIGTERM reaches it and the
-        // sounddevice stream's context manager runs — releasing the mic
-        // (and the orange indicator) cleanly. Wait synchronously so the
-        // app doesn't exit before the child is reaped.
+        // Python is a direct child, so SIGTERM reaches it cleanly.
+        // Wait synchronously so the app does not exit before it is reaped.
         p.terminate()
         let deadline = Date().addingTimeInterval(2.0)
         while p.isRunning && Date() < deadline {

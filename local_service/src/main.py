@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import socket
 from contextlib import asynccontextmanager
@@ -22,10 +21,7 @@ PORT_FILE = Path.home() / "Library" / "Application Support" / "Friday" / "port"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     tools.load_all()
-    loop = asyncio.get_running_loop()
-    detector = WakeDetector(loop)
-    detector.start()
-    runtime.detector = detector
+    runtime.detector = WakeDetector()
     port = getattr(app.state, "bound_port", None)
     if port is not None:
         _write_port_file(port)
@@ -35,8 +31,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        log.info("shutting down wake detector")
-        detector.stop()
         runtime.detector = None
         _clear_port_file()
 

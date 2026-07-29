@@ -8,13 +8,6 @@ struct TokenResponse: Decodable {
     let agentName: String
 }
 
-struct WakeEvent: Decodable {
-    let type: String
-    let phrase: String?
-    let timestamp: String?
-    let confidence: Double?
-}
-
 actor LocalServiceClient {
     private let baseURL: URL
     private let session: URLSession
@@ -43,15 +36,6 @@ actor LocalServiceClient {
         return try JSONDecoder().decode(TokenResponse.self, from: data)
     }
 
-    func pauseWake() async throws { try await postEmpty("wake/pause") }
-    func resumeWake() async throws { try await postEmpty("wake/resume") }
-
-    private func postEmpty(_ path: String) async throws {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
-        req.httpMethod = "POST"
-        _ = try await session.data(for: req)
-    }
-
     /// Returns the raw profile JSON string (suitable for forwarding via RPC).
     func getProfileJSON() async throws -> String {
         let (data, resp) = try await session.data(from: baseURL.appendingPathComponent("profile"))
@@ -73,6 +57,19 @@ actor LocalServiceClient {
             throw NSError(domain: "Friday", code: 6, userInfo: [NSLocalizedDescriptionKey: "tool execute failed"])
         }
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    func resumeWake() async throws {
+        var req = URLRequest(url: baseURL.appendingPathComponent("wake/resume"))
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "wake reset failed"]
+            )
+        }
     }
 
     /// Long-lived WebSocket; emits raw JSON event text via the callback.

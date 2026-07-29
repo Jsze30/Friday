@@ -16,23 +16,15 @@ router = APIRouter()
 
 @router.get("/health")
 async def health() -> dict[str, object]:
-    paused = runtime.detector.is_paused if runtime.detector else None
     return {
         "ok": True,
-        "wakePaused": paused,
+        "wakePaused": runtime.detector.is_paused if runtime.detector else None,
     }
 
 
 @router.post("/token")
 async def token() -> dict[str, str | int]:
     return mint_token()
-
-
-@router.post("/wake/pause")
-async def wake_pause() -> dict[str, bool]:
-    if runtime.detector:
-        runtime.detector.pause()
-    return {"paused": True}
 
 
 @router.post("/wake/resume")
@@ -63,6 +55,29 @@ async def tools_execute(payload: dict = Body(...)) -> dict[str, object]:
     if not isinstance(args, dict):
         raise HTTPException(status_code=400, detail="arguments must be an object")
     return await tools.execute(name, args)
+
+
+@router.websocket("/wake/audio")
+async def wake_audio(ws: WebSocket) -> None:
+    await ws.accept()
+    log.info("wake audio client connected")
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            detector = runtime.detector
+            if detector is None:
+                continue
+            event = await asyncio.to_thread(detector.process_pcm, data)
+            if event is not None:
+                bus.publish(event)
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("wake audio websocket error")
+    finally:
+        log.info("wake audio client disconnected")
 
 
 @router.websocket("/events")
