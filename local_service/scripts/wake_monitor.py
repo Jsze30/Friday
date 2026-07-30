@@ -27,7 +27,7 @@ import sounddevice as sd
 from openwakeword.model import Model
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-from src.config import settings  # noqa: E402
+from src.config import settings
 
 SAMPLE_RATE = 16000
 BLOCKSIZE = 1280  # 80 ms, openWakeWord's expected frame size

@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from . import profile, runtime, tools
+from . import capabilities, profile, runtime, tools
 from .events import bus
 from .tokens import mint_token
 
@@ -40,14 +40,14 @@ async def get_profile() -> dict[str, object]:
 
 
 @router.put("/profile")
-async def put_profile(data: dict = Body(...)) -> dict[str, object]:
+async def put_profile(data: dict) -> dict[str, object]:
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="profile must be an object")
     return profile.save(data)
 
 
 @router.post("/tools/execute")
-async def tools_execute(payload: dict = Body(...)) -> dict[str, object]:
+async def tools_execute(payload: dict) -> dict[str, object]:
     name = payload.get("tool")
     if not isinstance(name, str) or not name:
         raise HTTPException(status_code=400, detail="tool is required")
@@ -55,6 +55,13 @@ async def tools_execute(payload: dict = Body(...)) -> dict[str, object]:
     if not isinstance(args, dict):
         raise HTTPException(status_code=400, detail="arguments must be an object")
     return await tools.execute(name, args)
+
+
+@router.post("/capabilities/execute")
+async def capabilities_execute(payload: dict) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    return await capabilities.execute(payload)
 
 
 @router.websocket("/wake/audio")

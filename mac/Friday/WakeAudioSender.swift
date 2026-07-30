@@ -49,6 +49,7 @@ final class WakeAudioSender: @unchecked Sendable {
     private func send(_ stream: AsyncStream<Data>) async {
         var socket: URLSessionWebSocketTask?
         var keepAlive: Task<Void, Never>?
+        var receiver: Task<Void, Never>?
 
         for await data in stream {
             guard !Task.isCancelled else { break }
@@ -59,6 +60,7 @@ final class WakeAudioSender: @unchecked Sendable {
                     newSocket.resume()
                     socket = newSocket
                     keepAlive = Self.startKeepAlive(for: newSocket)
+                    receiver = Self.startReceiver(for: newSocket)
                 }
 
                 do {
@@ -70,6 +72,8 @@ final class WakeAudioSender: @unchecked Sendable {
                     )
                     keepAlive?.cancel()
                     keepAlive = nil
+                    receiver?.cancel()
+                    receiver = nil
                     socket?.cancel(with: .abnormalClosure, reason: nil)
                     socket = nil
                     try? await Task.sleep(nanoseconds: 250_000_000)
@@ -78,7 +82,29 @@ final class WakeAudioSender: @unchecked Sendable {
         }
 
         keepAlive?.cancel()
+        receiver?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
+    }
+
+    /// Keep an outstanding receive active so Foundation continuously processes
+    /// inbound control frames, including the pong responses to our keepalives.
+    private static func startReceiver(
+        for socket: URLSessionWebSocketTask
+    ) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                do {
+                    _ = try await socket.receive()
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    Self.logger.warning(
+                        "wake audio receive failed: \(String(describing: error), privacy: .public)"
+                    )
+                    socket.cancel(with: .abnormalClosure, reason: nil)
+                    return
+                }
+            }
+        }
     }
 
     private static func startKeepAlive(

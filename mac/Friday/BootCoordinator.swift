@@ -11,13 +11,15 @@ final class BootCoordinator {
     let liveKit = LiveKitController()
 
     func start() {
+        LocationProvider.shared.start()
+        MacPrimitiveProvider.shared.requestAccessibilityPermission()
         Task { await self.boot() }
     }
 
     private func boot() async {
         do {
             try LocalServiceProcess.shared.start()
-            let port = try await LocalServiceProcess.shared.waitForPort()
+            let port = try await LocalServiceProcess.shared.waitForPort(timeout: 30)
             servicePort = port
             let c = LocalServiceClient(port: port)
             client = c
@@ -25,6 +27,12 @@ final class BootCoordinator {
             try await c.health()
             let token = try await c.mintToken()
             try await liveKit.connect(token: token, servicePort: port)
+
+            LocationProvider.shared.onLocationUpdate = { [weak self] json in
+                Task { @MainActor in
+                    await self?.liveKit.forwardLocationUpdated(json: json)
+                }
+            }
 
             // Subscribe to local_service events.
             eventTask = c.openEventStream(

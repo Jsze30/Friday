@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2EA4FFCAF2F8E81DD79AB86B /* LocationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2062EE1122ED5541754B4837 /* LocationProvider.swift */; };
 		355994E56A3DADB26F4910B6 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4980384A323C78E7074210B /* AppState.swift */; };
 		51A70F87286B76C888B19BF7 /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = B88C8DA9B00B4DEC0D8FAB2C /* LiveKit */; };
 		66712A7879643DB6E68A5312 /* LocalServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514CF558386EF8FCDBEF33AF /* LocalServiceClient.swift */; };
@@ -15,6 +16,7 @@
 		8F2BF0A0C80FD6AF193EB310 /* LocalServiceProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02F14163109968934182741E /* LocalServiceProcess.swift */; };
 		9C50D0D2D092D1094BC493DA /* WakeAudioSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56C09602D1ED1549DE612D4A /* WakeAudioSender.swift */; };
 		A3B4A1C6C261DE6B1BC34D6B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C43800E91AC725610C62109C /* AppDelegate.swift */; };
+		BA2879B5365F37C4D4EC74B2 /* MacPrimitiveProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261FD3A9DAB19B67F83ED3CA /* MacPrimitiveProvider.swift */; };
 		C3CFC2C238642F81D4A5D704 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F089A1E96E1BF7CCF777C7DA /* MenuBarController.swift */; };
 		CBD6DA52EACA6189C8BE583C /* LiveKitController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3944C0BB9B8B0CC014AA7D /* LiveKitController.swift */; };
 		EE98A221718ACC9E2B2E437F /* BootCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C7459EA715FA8889C329CF /* BootCoordinator.swift */; };
@@ -22,7 +24,9 @@
 
 /* Begin PBXFileReference section */
 		02F14163109968934182741E /* LocalServiceProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalServiceProcess.swift; sourceTree = "<group>"; };
+		2062EE1122ED5541754B4837 /* LocationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationProvider.swift; sourceTree = "<group>"; };
 		21C7459EA715FA8889C329CF /* BootCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootCoordinator.swift; sourceTree = "<group>"; };
+		261FD3A9DAB19B67F83ED3CA /* MacPrimitiveProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPrimitiveProvider.swift; sourceTree = "<group>"; };
 		29D508F40C7D0C1FD5CAF20E /* Friday.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Friday.entitlements; sourceTree = "<group>"; };
 		39A3B17108AF73EEF30F26A1 /* Friday.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Friday.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		514CF558386EF8FCDBEF33AF /* LocalServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalServiceClient.swift; sourceTree = "<group>"; };
@@ -76,6 +80,8 @@
 				BD3944C0BB9B8B0CC014AA7D /* LiveKitController.swift */,
 				514CF558386EF8FCDBEF33AF /* LocalServiceClient.swift */,
 				02F14163109968934182741E /* LocalServiceProcess.swift */,
+				2062EE1122ED5541754B4837 /* LocationProvider.swift */,
+				261FD3A9DAB19B67F83ED3CA /* MacPrimitiveProvider.swift */,
 				F089A1E96E1BF7CCF777C7DA /* MenuBarController.swift */,
 				56C09602D1ED1549DE612D4A /* WakeAudioSender.swift */,
 				AEA081BF8F008F93937D98C1 /* WakeDetector.swift */,
@@ -154,6 +160,8 @@
 				CBD6DA52EACA6189C8BE583C /* LiveKitController.swift in Sources */,
 				66712A7879643DB6E68A5312 /* LocalServiceClient.swift in Sources */,
 				8F2BF0A0C80FD6AF193EB310 /* LocalServiceProcess.swift in Sources */,
+				2EA4FFCAF2F8E81DD79AB86B /* LocationProvider.swift in Sources */,
+				BA2879B5365F37C4D4EC74B2 /* MacPrimitiveProvider.swift in Sources */,
 				C3CFC2C238642F81D4A5D704 /* MenuBarController.swift in Sources */,
 				9C50D0D2D092D1094BC493DA /* WakeAudioSender.swift in Sources */,
 				8BA630132EF810FEDF1A178B /* WakeDetector.swift in Sources */,

@@ -8,7 +8,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from . import runtime, tools
+from . import capabilities, runtime, tools
 from .logging_setup import setup_logging
 from .routes import router
 from .wake import WakeDetector
@@ -21,6 +21,7 @@ PORT_FILE = Path.home() / "Library" / "Application Support" / "Friday" / "port"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     tools.load_all()
+    capabilities.load_all()
     runtime.detector = WakeDetector()
     port = getattr(app.state, "bound_port", None)
     if port is not None:
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await capabilities.shutdown()
         runtime.detector = None
         _clear_port_file()
 

@@ -9,18 +9,18 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "livekit-api>=0.8",
+    "keyring>=25.6",
     "numpy>=1.26",
     "openwakeword>=0.6.0",
     "python-dotenv>=1.0",
-    "google-api-python-client>=2.140",
-    "google-auth>=2.34",
-    "google-auth-oauthlib>=1.2",
 ]
 
 # sounddevice is only used by scripts/wake_monitor.py for validating candidate
 # wake models against the raw microphone.
 [dependency-groups]
 dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
     "sounddevice>=0.5",
 ]
 

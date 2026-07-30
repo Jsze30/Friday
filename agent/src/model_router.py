@@ -57,6 +57,48 @@ _COMPLEX_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _LONG_REQUEST_WORDS = 45
 
+_SIMPLE_SYSTEM_PATTERN = re.compile(
+    r"^(?:(?:please|(?:can|could|would)\s+you)\s+)?(?:"
+    r"(?:open|visit|go\s+to)\s+(?:https?://|www\.)\S+"
+    r"(?:\s+(?:in|with|using)\s+[\w .'-]+)?|"
+    r"(?:open|launch|focus|activate|quit|close)\s+(?:the\s+)?[\w .'-]+|"
+    r"(?:set|change|turn)\s+(?:the\s+)?(?:mac\s+)?volume\s+(?:to\s+)?\d{1,3}|"
+    r"(?:raise|increase|lower|decrease|turn\s+up|turn\s+down)\s+"
+    r"(?:the\s+)?(?:mac\s+)?volume|"
+    r"(?:mute|unmute)\s+(?:the\s+)?(?:mac|audio|sound|volume)?|"
+    r"(?:what(?:'s| is)\s+)?(?:the\s+)?(?:mac\s+)?volume(?:\s+level)?|"
+    r"list\s+(?:the\s+)?(?:running\s+)?apps"
+    r")[.!?]?$",
+    re.IGNORECASE,
+)
+
+_SIMPLE_MUSIC_PATTERN = re.compile(
+    r"^(?:(?:please|(?:can|could|would)\s+you)\s+)?(?:"
+    r"(?:play|pause|resume)\b.+|"
+    r"(?:open|show|list|browse)\b.+\bplaylists?\b|"
+    r"(?:what|which)\s+(?:songs|tracks)\b.+\bplaylists?\b|"
+    r"look\s+(?:through|in)\b.+\bplaylists?\b|"
+    r"(?:skip|next|previous)(?:\s+(?:song|track))?|"
+    r"(?:what(?:'s| is)\s+(?:currently\s+)?playing)|"
+    r"(?:what\s+(?:song|track)\s+is\s+(?:this|playing))|"
+    r"(?:add|queue)\b.+|"
+    r"(?:turn\s+)?shuffle\s+(?:on|off)|"
+    r"(?:set\s+)?spotify\s+volume\s+(?:to\s+)?\d{1,3}"
+    r")[.!?]?$",
+    re.IGNORECASE,
+)
+
+_TOOL_REQUEST_PATTERN = re.compile(
+    r"\b(?:"
+    r"weather|forecast|search|look\s+up|find|open|launch|"
+    r"play|pause|skip|file|folder|directory|downloads?|desktop|documents?|"
+    r"browser|website|web|spotify|vscode|visual\s+studio\s+code|arc|finder|"
+    r"click|type|write|move|rename|delete|trash|run|execute|"
+    r"screen|window|current\s+app"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -80,5 +122,14 @@ def route_request(text: str | None) -> RouteDecision:
     for reason, pattern in _COMPLEX_PATTERNS:
         if pattern.search(normalized):
             return RouteDecision("complex", reason)
+
+    if _SIMPLE_MUSIC_PATTERN.fullmatch(normalized):
+        return RouteDecision("fast", "simple music control")
+
+    if _SIMPLE_SYSTEM_PATTERN.fullmatch(normalized):
+        return RouteDecision("fast", "simple Mac control")
+
+    if _TOOL_REQUEST_PATTERN.search(normalized):
+        return RouteDecision("complex", "computer or web action")
 
     return RouteDecision("fast", "default")

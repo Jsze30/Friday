@@ -119,15 +119,23 @@ final class LiveKitController: NSObject, RoomDelegate {
         }
     }
 
-    /// Cold-start tolerant: if the agent worker isn't in the room yet, keep
-    /// waiting (one retry) instead of erroring. The user stays in
-    /// `wakeDetected` while the worker spins up.
+    /// Cold-start tolerant: participant presence can precede RPC method
+    /// registration while the cloud agent loads its tools and context. Retry
+    /// across that initialization window instead of failing immediately.
     private func activateTurnWithRetry() async throws {
-        do {
-            try await callAgent("activate_turn")
-        } catch {
-            NSLog("[Friday] activate_turn cold-start retry: \(error)")
-            try await callAgent("activate_turn")
+        let deadline = Date().addingTimeInterval(20)
+        var attempt = 0
+
+        while true {
+            attempt += 1
+            do {
+                try await callAgent("activate_turn", responseTimeout: 10)
+                return
+            } catch {
+                guard Date() < deadline else { throw error }
+                NSLog("[Friday] activate_turn retry \(attempt): \(error)")
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
     }
 
@@ -149,10 +157,122 @@ final class LiveKitController: NSObject, RoomDelegate {
             guard let port = await BootCoordinator.shared.servicePort else { return "{}" }
             return (try? await LocalServiceClient(port: port).getProfileJSON()) ?? "{}"
         }
+        try? await room.registerRpcMethod("get_location") { _ in
+            await MainActor.run {
+                LocationProvider.shared.currentLocationJSON()
+            }
+        }
+        try? await room.registerRpcMethod("get_context") { _ in
+            guard let port = await BootCoordinator.shared.servicePort else { return "{}" }
+            let profile = (try? await LocalServiceClient(port: port).getProfileObject())
+                ?? [:]
+            let location = await MainActor.run {
+                LocationProvider.shared.currentLocationObject()
+            }
+            return Self.encodeJSON([
+                "profile": profile,
+                "location": location,
+            ])
+        }
         try? await room.registerRpcMethod("tool_call") { data in
             guard let port = await BootCoordinator.shared.servicePort else { return "{}" }
-            return (try? await LocalServiceClient(port: port).executeTool(jsonPayload: data.payload)) ?? "{}"
+            return await self.executeBridgedTool(
+                jsonPayload: data.payload,
+                servicePort: port
+            )
         }
+        try? await room.registerRpcMethod("capability_call") { data in
+            guard let port = await BootCoordinator.shared.servicePort else {
+                return Self.errorEnvelope("local service is not ready")
+            }
+            do {
+                return try await LocalServiceClient(port: port)
+                    .executeCapability(jsonPayload: data.payload)
+            } catch {
+                return Self.errorEnvelope("local capability call failed")
+            }
+        }
+    }
+
+    private func executeBridgedTool(
+        jsonPayload: String,
+        servicePort: Int
+    ) async -> String {
+        guard let payload = Self.decodeJSON(jsonPayload),
+              let tool = payload["tool"] as? String else {
+            return Self.errorEnvelope("tool is required")
+        }
+
+        if tool == "__list__" {
+            do {
+                let localJSON = try await LocalServiceClient(port: servicePort)
+                    .executeTool(jsonPayload: jsonPayload)
+                return Self.mergeToolManifests(localJSON: localJSON)
+            } catch {
+                return Self.errorEnvelope("could not load local primitives")
+            }
+        }
+
+        if MacPrimitiveProvider.shared.toolNames.contains(tool) {
+            return await MacPrimitiveProvider.shared.execute(jsonPayload: jsonPayload)
+        }
+
+        if tool == "confirm_action",
+           let arguments = payload["arguments"] as? [String: Any],
+           let confirmationID = arguments["confirmation_id"] as? String,
+           confirmationID.hasPrefix("mac:") {
+            return await MacPrimitiveProvider.shared.confirm(jsonPayload: jsonPayload)
+        }
+
+        do {
+            return try await LocalServiceClient(port: servicePort)
+                .executeTool(jsonPayload: jsonPayload)
+        } catch {
+            return Self.errorEnvelope("local primitive call failed")
+        }
+    }
+
+    private static func mergeToolManifests(localJSON: String) -> String {
+        guard var envelope = decodeJSON(localJSON),
+              var data = envelope["data"] as? [String: Any],
+              var tools = data["tools"] as? [[String: Any]] else {
+            return errorEnvelope("local primitive manifest was invalid")
+        }
+        tools.append(contentsOf: MacPrimitiveProvider.shared.manifests)
+        data["tools"] = tools
+        envelope["data"] = data
+        return encodeJSON(envelope)
+    }
+
+    private nonisolated static func decodeJSON(_ value: String) -> [String: Any]? {
+        guard let data = value.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return object as? [String: Any]
+    }
+
+    private nonisolated static func encodeJSON(_ object: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+              ) else {
+            return #"{"ok":false,"error":"could not encode JSON"}"#
+        }
+        return String(data: data, encoding: .utf8)
+            ?? #"{"ok":false,"error":"could not encode JSON"}"#
+    }
+
+    private nonisolated static func errorEnvelope(_ message: String) -> String {
+        encodeJSON([
+            "ok": false,
+            "spoken": NSNull(),
+            "data": NSNull(),
+            "needsConfirmation": false,
+            "confirmationId": NSNull(),
+            "error": message,
+        ])
     }
 
     /// Forward a profile_updated event from local_service to the agent.
@@ -166,6 +286,20 @@ final class LiveKitController: NSObject, RoomDelegate {
             )
         } catch {
             NSLog("[Friday] forwardProfileUpdated failed: \(error)")
+        }
+    }
+
+    /// Forward a fresh Core Location snapshot to the agent.
+    func forwardLocationUpdated(json: String) async {
+        do {
+            let agent = try await waitForAgentParticipant(timeout: 2.0)
+            _ = try await room.localParticipant.performRpc(
+                destinationIdentity: agent.identity!,
+                method: "location_updated",
+                payload: json
+            )
+        } catch {
+            NSLog("[Friday] forwardLocationUpdated failed: \(error)")
         }
     }
 
@@ -190,12 +324,17 @@ final class LiveKitController: NSObject, RoomDelegate {
         wakeDetector?.resume()
     }
 
-    private func callAgent(_ method: String, payload: String = "") async throws {
+    private func callAgent(
+        _ method: String,
+        payload: String = "",
+        responseTimeout: TimeInterval = 15
+    ) async throws {
         let agent = try await waitForAgentParticipant(timeout: 15.0)
         _ = try await room.localParticipant.performRpc(
             destinationIdentity: agent.identity!,
             method: method,
-            payload: payload
+            payload: payload,
+            responseTimeout: responseTimeout
         )
     }
 

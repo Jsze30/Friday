@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,7 @@ def save(data: dict[str, Any]) -> dict[str, Any]:
         data = dict(data)
         data.setdefault("version", 1)
         data.setdefault("facts", {})
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        data["updated_at"] = datetime.now(UTC).isoformat()
         _atomic_write(data)
     bus.publish({"type": "profile_updated", "profile": data})
     return data

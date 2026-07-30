@@ -45,6 +45,20 @@ actor LocalServiceClient {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    func getProfileObject() async throws -> [String: Any] {
+        let raw = try await getProfileJSON()
+        guard let data = raw.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            throw NSError(
+                domain: "Friday",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "profile JSON was invalid"]
+            )
+        }
+        return object
+    }
+
     /// payload is a JSON object: {"tool": "...", "arguments": {...}, "requestId": "..."}
     /// Returns the raw response envelope JSON string.
     func executeTool(jsonPayload: String) async throws -> String {
@@ -55,6 +69,27 @@ actor LocalServiceClient {
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw NSError(domain: "Friday", code: 6, userInfo: [NSLocalizedDescriptionKey: "tool execute failed"])
+        }
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    /// Starts, polls, lists, or cancels one background capability task.
+    func executeCapability(jsonPayload: String) async throws -> String {
+        var req = URLRequest(
+            url: baseURL.appendingPathComponent("capabilities/execute")
+        )
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = jsonPayload.data(using: .utf8)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 8,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "capability call failed"
+                ]
+            )
         }
         return String(data: data, encoding: .utf8) ?? "{}"
     }

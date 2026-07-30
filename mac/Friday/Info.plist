@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Friday uses your location to answer location-aware requests.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Friday listens for the wake word and your spoken requests.</string>
 </dict>

@@ -16,10 +16,14 @@ served by a localhost-only Python service.
 - Connects the Mac app to a LiveKit Cloud room when the app starts.
 - Dispatches the `friday-agent` LiveKit worker into that room.
 - Enables the microphone only after local wake detection.
-- Runs a spoken assistant powered by Deepgram STT, Anthropic Claude, Deepgram
-  TTS, and Silero VAD.
-- Lets the assistant call local tools for time, weather, memory/profile updates,
-  Google Calendar, and allowlisted Mac actions.
+- Runs a spoken assistant powered by Deepgram STT/TTS, routed OpenAI models, and Silero VAD.
+- Gives the assistant one high-level capability runner backed by ranked providers.
+- Gives common app and audio actions one direct native `control_mac` path.
+- Keeps the reusable primitive kernel behind two fallback discovery tools instead of showing every primitive to the model.
+- Runs slow capabilities in cancellable background tasks so the live voice loop can keep responding.
+- Discovers application controls at runtime through macOS Accessibility instead of requiring a custom Spotify, VS Code, Arc, or Finder integration.
+- Requires explicit confirmation before destructive file changes, processes, AppleScript, or UI interactions execute.
+- Supplies a live human-readable Core Location place and a fresh local clock as ambient context.
 - Stores stable profile facts locally and injects them into the agent prompt.
 - Returns to sleep after the agent answers and a short follow-up window expires.
 
@@ -40,6 +44,7 @@ served by a localhost-only Python service.
 |   |-- src/wake.py        # Vosk wake-word detector over sounddevice
 |   |-- src/tokens.py      # LiveKit AccessToken minting with agent dispatch
 |   |-- src/profile.py     # Local profile storage and update events
+|   |-- src/capabilities/  # Provider broker and background task runtime
 |   |-- src/tools/         # Tool registry and concrete local tools
 |   |-- scripts/           # Setup helpers
 |   |-- pyproject.toml
@@ -79,8 +84,9 @@ Main files:
   process and reads its selected port.
 - `mac/Friday/LocalServiceClient.swift` calls the local FastAPI API and opens
   the local event WebSocket.
-- `mac/Friday/LiveKitController.swift` connects to LiveKit, registers RPC
-  handlers, controls the microphone, and forwards local tool/profile RPCs.
+- `mac/Friday/LiveKitController.swift` connects to LiveKit, registers RPC handlers, controls the microphone, and routes tool calls.
+- `mac/Friday/MacPrimitiveProvider.swift` discovers applications and exposes generic macOS Accessibility inspection and interaction.
+- `mac/Friday/LocationProvider.swift` requests Core Location permission, reverse geocodes coordinates, and provides fresh location snapshots to the cloud agent.
 
 Important implementation detail: `LocalServiceProcess.swift` currently contains
 hard-coded paths pointing at `/Users/jas/Documents/Coding/friday/local_service`.
@@ -102,6 +108,7 @@ Responsibilities:
 - Mint LiveKit tokens for the Mac participant.
 - Serve profile data from local disk.
 - Register and execute local tools.
+- Rank, execute, verify, retry, and cancel high-level capability providers.
 - Publish wake/profile events over a WebSocket consumed by Swift.
 
 Local service API:
@@ -115,6 +122,7 @@ Local service API:
 | `GET /profile` | Returns the local profile JSON. |
 | `PUT /profile` | Replaces/saves the local profile and emits `profile_updated`. |
 | `POST /tools/execute` | Executes a tool by name with JSON arguments. |
+| `POST /capabilities/execute` | Lists, starts, polls, or cancels a capability task. |
 | `WS /events` | Streams local events such as `wake_detected` and `profile_updated`. |
 
 ### `agent/`: LiveKit Cloud Agent
@@ -125,13 +133,13 @@ It owns the speech and reasoning pipeline, but not local machine access.
 Current model pipeline in `agent/src/agent.py`:
 
 - STT: Deepgram `flux-general-en`
-- LLM: Anthropic `claude-haiku-4-5-20251001`
+- LLM: fast and complex OpenAI models selected by the local model router
 - TTS: Deepgram `aura-2-athena-en`
 - VAD: Silero, loaded in `prewarm`
 
-The agent starts with `BASE_INSTRUCTIONS`, then appends profile facts from the
-local profile if available. It dynamically builds LiveKit `function_tool`
-wrappers from the local tool manifest returned by `tool_call` with `__list__`.
+The agent starts with `BASE_INSTRUCTIONS`, then appends profile facts and a live Core Location snapshot when available.
+It injects the current local time on every LLM turn.
+It exposes `run_capability` directly and places dynamically discovered primitives behind LiveKit's fixed `tool_search` and `call_tool` interface.
 
 Deployment metadata:
 
@@ -156,7 +164,7 @@ Swift menu bar app
 LiveKit Cloud room <---- deployed friday-agent worker
       ^
       |
-      | LiveKit RPC: tool_call / get_profile / profile_updated
+      | LiveKit RPC: capability_call / tool_call / get_context
       |
 Swift menu bar app
       |
@@ -193,12 +201,11 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 8. Swift registers RPC methods:
    - `return_to_sleep`
    - `set_assistant_state`
-   - `get_profile`
+   - `get_context`
+   - `capability_call`
    - `tool_call`
 9. LiveKit dispatches the cloud agent into the room.
-10. The agent waits for the Mac participant, fetches profile data, fetches the
-    tool manifest with `tool_call`/`__list__`, builds function tools, and starts
-    the session with audio input disabled.
+10. The agent waits for the Mac participant, fetches profile and location together, fetches the combined primitive manifest, wraps those primitives in a proxy toolset, and starts the session with audio input disabled.
 11. Swift opens `WS /events` to receive wake/profile events from
     `local_service`.
 
@@ -222,25 +229,81 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
    `activate_turn`.
 6. The agent enables audio input and listens.
 7. Agent state changes are sent back to Swift with `set_assistant_state`.
-8. If the LLM calls a tool, the cloud agent performs a `tool_call` RPC to Swift.
-9. Swift forwards the JSON payload to `POST /tools/execute`.
-10. `local_service` runs the tool and returns an envelope containing `spoken`,
-    `data`, and error/confirmation fields.
-11. The agent speaks the result or incorporates the tool result into its answer.
-12. After speaking, the agent enters a 5 second follow-up window.
-13. If no follow-up input arrives, the agent disables audio and calls
+8. For broad read-only work, the LLM calls `run_capability`.
+9. The agent starts a local capability task through `capability_call`.
+10. Fast tasks return immediately, while slow tasks release the voice loop and continue in the background.
+11. The agent polls small status messages and cancels local work if the user cancels the LiveKit task.
+12. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
+13. Swift forwards capability and primitive calls to their corresponding localhost APIs.
+14. `local_service` returns structured results with provider traces or primitive confirmation fields.
+15. The agent speaks the result or incorporates the tool result into its answer.
+16. After speaking, the agent enters a 5 second follow-up window.
+17. If no follow-up input arrives, the agent disables audio and calls
     `return_to_sleep`.
-14. Swift disables the microphone, resumes local wake processing, and sets the
+18. Swift disables the microphone, resumes local wake processing, and sets the
     app state to `sleeping`.
 
-## Tool System
+## Capability System
 
-Tools live in `local_service/src/tools/`. Each module is imported automatically
-by `tools.load_all()` during FastAPI startup. Registration happens through the
-`@tool` decorator, so there is no central list to edit.
+The capability layer is the normal path for multi-step work.
+The model calls one stable tool instead of selecting from every low-level action.
 
-The cloud agent discovers tools once per room session by calling the special
-tool name `__list__`. Each manifest includes:
+Common Mac system actions use the separate `control_mac` tool because they should complete immediately instead of becoming background tasks.
+It routes directly to native Swift primitives for apps and Core Audio.
+The supported actions are `list_apps`, `open_app`, `open_url`, `quit_app`, `get_volume`, `set_volume`, and `mute_audio`.
+`open_url` opens HTTP or HTTPS addresses through native macOS APIs and defaults to Arc.
+
+Current capabilities:
+
+| Capability | Default provider | What it does |
+| --- | --- | --- |
+| `files` | `files-direct` | Lists, reads, or searches allowed local files. |
+| `research` | `research-direct` | Searches the public web and reads up to five sources in parallel. |
+| `web` | `research-direct` | Reads one exact public URL or performs a web search. |
+| `coding` | `codex-readonly` | Runs an ephemeral Codex specialist in a read-only sandbox. |
+| `music` | `spotify-web-api` | Connects Spotify and controls playback, tracks, playlists, queue, shuffle, repeat, and volume. |
+
+The broker filters providers by capability and permission, checks availability, then ranks them by priority, reliability, and latency.
+It verifies every result and automatically falls back to the next provider when execution or verification fails.
+Every result includes the selected provider, elapsed time, and all attempts.
+
+Capability tasks are stored in memory for a bounded time.
+The operations are `list`, `start`, `status`, and `cancel`.
+Read-only work can run in the background, and LiveKit exposes running-task and cancellation controls automatically.
+
+Additional API, MCP, or specialist-agent providers can use the same contract without adding another model-facing tool.
+Set `FRIDAY_CAPABILITY_PROVIDERS_JSON` to a JSON array of configured command providers.
+Each command receives one JSON request on standard input and must return `{"summary":"...","data":{...}}` on standard output.
+For example:
+
+```json
+[
+  {
+    "id": "browser-agent",
+    "name": "browser specialist",
+    "capabilities": ["browser"],
+    "command": ["/absolute/path/to/browser-agent"],
+    "priority": 90,
+    "timeout_seconds": 120
+  }
+]
+```
+
+Configured command providers are trusted local extensions and are currently limited to the read-only capability path.
+The built-in Spotify provider uses a locally enforced `low_risk_write` policy for playback controls.
+Sensitive writes continue through confirmed primitives.
+
+## Primitive System
+
+Most primitives live in `local_service/src/tools/`.
+Each module is imported automatically by `tools.load_all()` during FastAPI startup.
+Registration happens through the `@tool` decorator, so there is no central Python list to edit.
+The app and Accessibility primitives live in `mac/Friday/MacPrimitiveProvider.swift` because they must execute inside the signed Mac app.
+
+The cloud agent discovers primitives once per room session by calling the special tool name `__list__`.
+Swift merges the local service and native Mac manifests before returning them.
+The model sees only `tool_search` and `call_tool` until it searches for a fallback primitive.
+Each manifest includes:
 
 - `name`
 - `description`
@@ -253,6 +316,7 @@ Parameter types must be one of:
 - `integer`
 - `number`
 - `boolean`
+- `array`
 
 The agent maps these to Python type annotations before passing wrappers to
 LiveKit `function_tool`.
@@ -270,21 +334,34 @@ Tool result envelope:
 }
 ```
 
-Current tools:
+Current primitive kernel:
 
 | Tool | Permission | What it does |
 | --- | --- | --- |
-| `get_time` | `read_only` | Returns current time for an IANA timezone, known city, saved timezone, or system local time. |
-| `get_weather` | `read_only` | Uses Open-Meteo geocoding/forecast APIs for current weather or today's forecast. |
-| `remember` | `low_risk_write` | Saves a stable profile fact under `facts.<key>`. |
-| `run_mac_action` | `low_risk_write` | Runs allowlisted Mac actions: open app, media play/pause, set volume. |
-| `list_calendar_events` | `read_only` | Lists Google Calendar events across calendars or a named calendar. |
-| `create_calendar_event` | `low_risk_write` | Creates a Google Calendar event. |
-| `find_free_time` | `read_only` | Finds free calendar slots across the user's calendars. |
+| `inspect_path` | `read_only` | Reads an allowed text file or lists Desktop, Documents, Downloads, or the project. |
+| `search_files` | `read_only` | Recursively searches file and folder names below an allowed root. |
+| `create_directory` | `low_risk_write` | Creates a folder inside an allowed root. |
+| `write_file` | `sensitive` | Atomically replaces an allowed text file after confirmation. |
+| `move_path` | `sensitive` | Moves or renames a file or folder after confirmation. |
+| `trash_path` | `sensitive` | Moves an item to the recoverable macOS Trash after confirmation. |
+| `run_process` | `sensitive` | Runs one executable directly without a shell after confirmation. |
+| `run_applescript` | `sensitive` | Controls scriptable Mac apps after confirmation. |
+| `web_search` | `read_only` | Searches the public web and returns structured results. |
+| `fetch_url` | `read_only` | Fetches a public HTTP or HTTPS URL while blocking local and private addresses. |
+| `list_apps` | `read_only` | Lists installed or running Mac applications. |
+| `open_app` | `low_risk_write` | Launches or activates any installed Mac application. |
+| `open_url` | `low_risk_write` | Opens an HTTP or HTTPS URL in Arc or another installed browser. |
+| `quit_app` | `sensitive` | Gracefully asks a running application to quit after confirmation. |
+| `get_volume` | `read_only` | Reads native Core Audio output volume and mute state. |
+| `set_volume` | `low_risk_write` | Sets native Core Audio output volume from 0 to 100. |
+| `mute_audio` | `low_risk_write` | Mutes or unmutes the default Core Audio output device. |
+| `inspect_ui` | `read_only` | Discovers the accessible controls in any running Mac application. |
+| `interact_ui` | `sensitive` | Performs a discovered Accessibility action after confirmation. |
+| `confirm_action` | `low_risk_write` | Approves or rejects one pending sensitive primitive. |
 
-Permission tiers are present in the manifest but are not currently enforced by
-the agent. The agent calls every registered tool unconditionally if the LLM
-chooses it.
+Sensitive actions are staged for 60 seconds and do not execute until the user explicitly approves the exact pending action.
+Tool responses are bounded below LiveKit's RPC payload limit.
+Friday blocks credential paths and server-side requests to local or private network addresses.
 
 ### Adding A Tool
 
@@ -333,42 +410,9 @@ If the file does not exist, `local_service` creates it from
 }
 ```
 
-The `remember` tool updates the `facts` object. Profile writes emit a
-`profile_updated` event over `WS /events`; Swift forwards that event to the
-agent with the `profile_updated` RPC; the agent then rebuilds its instructions
-with the current facts.
-
-The base agent instruction explicitly tells the LLM to use `remember` only for
-stable facts and preferences, not transient context.
-
-## Google Calendar
-
-Google Calendar tools use OAuth credentials stored at:
-
-```text
-~/Library/Application Support/Friday/google_calendar.json
-```
-
-Required env vars for the OAuth bootstrap:
-
-- `GOOGLE_OAUTH_CLIENT_ID`
-- `GOOGLE_OAUTH_CLIENT_SECRET`
-
-Run the one-time auth flow from `local_service/`:
-
-```bash
-uv run python scripts/google_calendar_auth.py
-```
-
-The script opens a browser, requests consent, and writes the refresh token file.
-The calendar code currently requests:
-
-- `https://www.googleapis.com/auth/calendar.readonly`
-- `https://www.googleapis.com/auth/calendar.events`
-
-Calendar date handling is deliberately defensive. Tool responses include a
-current local date/time context, and old explicit dates are rejected to reduce
-LLM date hallucination errors.
+Profile writes emit a `profile_updated` event over `WS /events`.
+Swift forwards that event to the agent with the `profile_updated` RPC, and the agent rebuilds its instructions with the current facts.
+Legacy saved location keys are excluded because live Core Location is authoritative.
 
 ## Configuration
 
@@ -411,14 +455,21 @@ Optional:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `SPOTIFY_CLIENT_ID` | none | Enables the Spotify provider using PKCE authentication. |
+| `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:43821/spotify/callback` | Exact loopback callback registered in the Spotify dashboard. |
+
+Spotify access and refresh tokens are stored in macOS Keychain under the service name `com.friday.spotify.oauth`.
+The Spotify Client Secret is not used.
+The provider requests playback-state, playback-control, private-playlist, and collaborative-playlist scopes.
 | `FRIDAY_AGENT_NAME` | `friday-agent` | Agent dispatch name embedded in room tokens. |
 | `FRIDAY_ROOM_PREFIX` | `friday` | Prefix for generated LiveKit room names. |
 | `FRIDAY_TOKEN_TTL_SECONDS` | `600` | Token lifetime. |
 | `FRIDAY_VOSK_MODEL_PATH` | `models/vosk-model-small-en-us-0.15` | Wake model path, relative to `local_service/` unless absolute. |
 | `FRIDAY_WAKE_PHRASE` | `friday` | Wake phrase recognized by Vosk grammar. |
 | `FRIDAY_WAKE_DEBOUNCE_MS` | `1500` | Minimum time between wake events. |
-| `GOOGLE_OAUTH_CLIENT_ID` | unset | Optional Google Calendar OAuth client id. |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | unset | Optional Google Calendar OAuth client secret. |
+| `FRIDAY_ALLOWED_PATHS` | empty | Extra allowed file roots separated by the platform path separator. |
+| `FRIDAY_CODE_AGENT` | auto-detected | Executable path or command name for the read-only coding specialist. |
+| `FRIDAY_CAPABILITY_PROVIDERS_JSON` | `[]` | JSON array of trusted external capability providers. |
 
 Do not commit real `.env`, `.env.local`, or `secrets.env` files.
 
@@ -435,6 +486,7 @@ Prerequisites:
 - A LiveKit Cloud project and API key/secret.
 - Deepgram and Anthropic API keys for the cloud agent.
 - A microphone and macOS microphone permission for the menu bar app.
+- macOS location permission for location-aware requests.
 
 Install the local service:
 
@@ -568,8 +620,7 @@ must reconnect to pick it up.
 | Path | Meaning |
 | --- | --- |
 | `~/Library/Application Support/Friday/port` | Current local service port file. |
-| `~/Library/Application Support/Friday/profile.json` | Local profile and remembered facts. |
-| `~/Library/Application Support/Friday/google_calendar.json` | Google Calendar OAuth refresh token. |
+| `~/Library/Application Support/Friday/profile.json` | Local profile facts. |
 | `~/Library/Logs/Friday/local_service.log` | Rotating local service log. |
 | `mac/build/` | Xcode build output when using the documented build command. |
 | `local_service/models/` | Downloaded Vosk wake-word model. |
@@ -582,11 +633,10 @@ The local service logger writes rotating logs with 2 MB files and 3 backups.
 - It has no HTTP authentication and trusts local callers.
 - Do not bind it to a non-loopback interface.
 - LiveKit tokens are short-lived; default TTL is 600 seconds.
-- Local profile and Google tokens are stored in the user's Application Support
-  directory.
-- Tool permission tiers are descriptive today, not enforced policy.
-- Mac actions are allowlisted in `run_mac_action`, but they still execute local
-  commands such as `open`, `osascript`, and `pgrep`.
+- Local profile data is stored in the user's Application Support directory.
+- Sensitive primitives require a short-lived explicit confirmation before execution.
+- File access is restricted to the project and ordinary Desktop, Documents, and Downloads roots by default.
+- Public HTTP reads block local, private, link-local, and reserved network addresses.
 
 ## Troubleshooting
 
@@ -625,16 +675,6 @@ and wait for Python to release the stream. On next launch, the app also runs
 Restart the room session. The agent fetches `__list__` once when it joins the
 room; it does not hot-reload the manifest during a session.
 
-### Calendar Tools Say Google Calendar Is Not Connected
-
-Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in
-`local_service/.env`, then run:
-
-```bash
-cd local_service
-uv run python scripts/google_calendar_auth.py
-```
-
 ### The Agent Is Not In The Room Yet
 
 `LiveKitController.activateTurnWithRetry()` retries once for cold starts. If it
@@ -663,14 +703,13 @@ Expected shape:
 
 ## Current Limitations
 
-- Tool permissions are not enforced.
 - Tool manifests are loaded once per session.
 - The Swift app path to `local_service` is hard-coded.
 - `local_service` has no local auth because it is intended to be loopback-only.
-- There are no committed automated tests in this repository at the moment.
-- Wake-word quality depends on the small Vosk English model and local microphone
-  conditions.
-- The current Mac action tool supports only a small allowlist.
+- Wake-word quality depends on the configured openWakeWord model and local microphone conditions.
+- macOS Accessibility permission must be granted by the user before `inspect_ui` and `interact_ui` can work.
+- Some apps expose incomplete Accessibility trees, so AppleScript or a direct process command can be a fallback.
+- Weather and other unsupported services use reusable web and app primitives until a dedicated provider is justified.
 
 ## Development Notes
 

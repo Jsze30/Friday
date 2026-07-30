@@ -72,7 +72,7 @@ class PreRollAudioInput(io.AudioInput):
         while True:
             try:
                 await asyncio.wait_for(self.source.__anext__(), timeout=0.05)
-            except (asyncio.TimeoutError, StopAsyncIteration):
+            except (TimeoutError, StopAsyncIteration):
                 return
 
     async def __anext__(self) -> rtc.AudioFrame:

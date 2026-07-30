@@ -6,8 +6,10 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
@@ -19,15 +21,24 @@ from livekit.agents import (
     ModelSettings,
     function_tool,
     llm,
+    room_io,
 )
-from livekit.agents.voice.room_io import RoomInputOptions
+from livekit.agents.beta.toolsets import ToolProxyToolset
 from livekit.plugins import anthropic, deepgram, openai, silero
 from openai.types import Reasoning as OpenAIReasoning
 
+from capability_tool import build_capability_tool
 from model_router import route_request
+from system_tool import SYSTEM_PRIMITIVE_NAMES, build_system_tool
 from turn_gate import PreRollAudioInput, PreRollReceiver
 
 FOLLOWUP_SECONDS = 5.0
+LOCATION_PROFILE_KEYS = {
+    "city",
+    "default_location",
+    "home_city",
+    "location",
+}
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 
@@ -38,38 +49,113 @@ FAST_MODEL = os.getenv("FRIDAY_FAST_MODEL", "gpt-4.1-nano")
 COMPLEX_MODEL = os.getenv("FRIDAY_COMPLEX_MODEL", "gpt-5.6-terra")
 COMPLEX_EFFORT = os.getenv("FRIDAY_COMPLEX_EFFORT", "low")
 
-BASE_INSTRUCTIONS = """You are Jarvis, a personal voice assistant on the user's Mac.
-Your name is Jarvis. Never correct the user for calling you Jarvis.
+BASE_INSTRUCTIONS = """You are Friday, a personal voice assistant on the user's Mac.
+Your name is Friday.
 Speak naturally and concisely. Avoid markdown, lists, or special characters -
 your replies are spoken aloud. Default to one or two short sentences unless the
 user explicitly asks for detail.
 
-Use the `remember` tool only for stable user facts and preferences (name, units,
-recurring people or places, long-term goals). Do not save transient context like
-the current task, today's plans, or one-off questions."""
+You have a high-level capability runner plus discoverable fallback primitives.
+Use run_capability first for file search and reading, web research, exact web
+pages, and coding analysis. It automatically chooses and retries providers. Use
+control_mac directly for opening, focusing, listing, or quitting apps, opening
+web URLs in a browser, and reading or changing volume and mute state. Use
+tool_search and call_tool for other direct primitives, weather, and operations
+that the high-level tools do not support. Do not claim you cannot inspect
+something until you have tried the relevant capability or read-only primitive.
 
-PARAM_TYPE_MAP: dict[str, type] = {
+Important mappings and workflows:
+- For run_capability inputs_json, pass a JSON object as a string.
+- For files, use capability files. Human paths include Downloads, Documents,
+  Desktop, and Friday project. Never guess a path such as /Downloads.
+- For broad research, use capability research with the query in inputs_json.
+- To read one known URL, use capability web with the URL in inputs_json.
+- For repository questions, use capability coding. It is read-only.
+- For Spotify, use capability music. Pass action as connect, status, play,
+  pause, next, previous, queue, shuffle, repeat, volume, list_playlists,
+  playlist_tracks, open_playlist, or play_playlist. For a named song, pass
+  action play and put the song and artist in query. For a named playlist, put
+  its spoken name in playlist. Use open_playlist to reveal it in Spotify and
+  play_playlist to begin playback. Do not use UI inspection or AppleScript for
+  Spotify actions supported by music.
+- For common app, browser URL, and audio actions, call control_mac directly.
+  Use open_url to open an HTTP or HTTPS URL in Arc by default, or pass another
+  installed browser name when the user requests it. Do not inspect the UI or use
+  AppleScript for an action supported by control_mac.
+- For current weather, use the ambient latitude and longitude with fetch_url and
+  Open-Meteo's forecast endpoint through the fallback primitive search. Request current temperature, apparent
+  temperature, weather code, and wind, use timezone=auto, and honor the user's
+  preferred temperature unit.
+- To use an app, call list_apps or open_app, then inspect_ui to discover its
+  current controls. Call interact_ui only with an exact element ID and an action
+  returned by the latest inspect_ui result.
+- When asked where the user is, answer with the human-readable place. Mention
+  coordinates only if the user asks for coordinates.
+
+Tool results contain structured data. Read that data and answer from it instead
+of repeating the tool's short status message.
+
+Sensitive tools report that confirmation is required before they execute. Explain
+the exact proposed action and stop. Call confirm_action only after the user
+explicitly approves or rejects that pending action. Never treat silence,
+ambiguity, or an earlier approval as confirmation."""
+
+PARAM_TYPE_MAP: dict[str, Any] = {
     "string": str,
     "integer": int,
     "number": float,
     "boolean": bool,
+    "array": list[str],
 }
 
 
-def render_instructions(profile: dict | None) -> str:
-    facts = (profile or {}).get("facts") or {}
-    if not facts:
-        return BASE_INSTRUCTIONS
-    lines = [f"- {k}: {v}" for k, v in facts.items()]
-    return BASE_INSTRUCTIONS + "\n\n<profile>\n" + "\n".join(lines) + "\n</profile>"
+def render_instructions(
+    profile: dict | None,
+    location: dict | None = None,
+) -> str:
+    sections = [BASE_INSTRUCTIONS]
+    facts = {
+        key: value
+        for key, value in ((profile or {}).get("facts") or {}).items()
+        if key not in LOCATION_PROFILE_KEYS
+    }
+    if facts:
+        lines = [f"- {k}: {v}" for k, v in facts.items()]
+        sections.append("<profile>\n" + "\n".join(lines) + "\n</profile>")
+
+    if (location or {}).get("status") == "available":
+        location_lines = []
+        for key in (
+            "place",
+            "city",
+            "region",
+            "country",
+            "countryCode",
+            "postalCode",
+            "latitude",
+            "longitude",
+            "horizontalAccuracyMeters",
+            "timestamp",
+        ):
+            value = (location or {}).get(key)
+            if value is not None:
+                location_lines.append(f"- {key}: {value}")
+        sections.append(
+            "<current_location>\n"
+            + "\n".join(location_lines)
+            + "\n"
+            + "</current_location>"
+        )
+
+    return "\n\n".join(sections)
 
 
-class JarvisAgent(Agent):
+class FridayAgent(Agent):
     def __init__(
         self,
         *,
         instructions: str,
-        tools: list[llm.Tool],
+        tools: list[llm.Tool | llm.Toolset],
         fast_llm: llm.LLM,
         complex_llm: llm.LLM,
         complex_extra_kwargs: dict[str, Any] | None = None,
@@ -82,6 +168,21 @@ class JarvisAgent(Agent):
         self._fast_llm = fast_llm
         self._complex_llm = complex_llm
         self._complex_extra_kwargs = complex_extra_kwargs or {}
+        self._timezone = ZoneInfo("UTC")
+
+    def update_ambient_context(
+        self,
+        profile: dict | None,
+        location: dict | None,
+    ) -> None:
+        facts = (profile or {}).get("facts") or {}
+        timezone_name = facts.get("timezone") or (location or {}).get("timezone")
+        if not isinstance(timezone_name, str):
+            return
+        try:
+            self._timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            logger.warning("unknown ambient timezone: %s", timezone_name)
 
     @staticmethod
     def _latest_user_text(chat_ctx: llm.ChatContext) -> str | None:
@@ -112,8 +213,21 @@ class JarvisAgent(Agent):
             decision.reason,
         )
 
+        current_time = datetime.now(self._timezone)
+        turn_chat_ctx = chat_ctx.copy()
+        turn_chat_ctx.add_message(
+            role="system",
+            content=(
+                "<current_time>\n"
+                f"- local_datetime: {current_time.isoformat(timespec='seconds')}\n"
+                f"- weekday: {current_time.strftime('%A')}\n"
+                f"- timezone: {self._timezone.key}\n"
+                "</current_time>"
+            ),
+        )
+
         async with selected_llm.chat(
-            chat_ctx=chat_ctx,
+            chat_ctx=turn_chat_ctx,
             tools=tools,
             tool_choice=model_settings.tool_choice,
             conn_options=self.session.conn_options.llm_conn_options,
@@ -177,6 +291,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # LLM already runs preemptively by default; also start TTS before the
         # turn is confirmed so first audio is ready the moment it commits.
         turn_handling={"preemptive_generation": {"preemptive_tts": True}},
+        max_tool_steps=6,
     )
 
     await ctx.connect()
@@ -213,7 +328,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 method=method,
                 payload=payload,
             )
-        except Exception as e:
+        # LiveKit RPC can surface transport, timeout, or participant errors
+        # from several SDK exception families.
+        except Exception as e:  # noqa: BLE001
             logger.warning("rpc %s failed: %s", method, e)
             return None
 
@@ -264,10 +381,25 @@ async def entrypoint(ctx: JobContext) -> None:
         annotations["return"] = str
 
         async def _proxy(**kwargs: Any) -> str:
+            logger.info("tool_call name=%s", tool_name)
             envelope = await call_tool(tool_name, kwargs)
+            logger.info(
+                "tool_result name=%s ok=%s confirmation=%s",
+                tool_name,
+                envelope.get("ok"),
+                envelope.get("needsConfirmation", False),
+            )
             if not envelope.get("ok"):
                 return envelope.get("error") or f"{tool_name} failed"
-            return envelope.get("spoken") or "done"
+            result = {
+                "message": envelope.get("spoken"),
+                "data": envelope.get("data"),
+                "needsConfirmation": envelope.get("needsConfirmation", False),
+                "confirmationId": envelope.get("confirmationId"),
+            }
+            return json.dumps(
+                {key: value for key, value in result.items() if value is not None}
+            )
 
         _proxy.__name__ = tool_name
         _proxy.__signature__ = inspect.Signature(
@@ -298,18 +430,90 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("registered %d tools: %s", len(built), [m["name"] for m in manifests])
         return built
 
+    async def fetch_capability_catalog() -> dict[str, Any]:
+        raw = await rpc_to_mac(
+            "capability_call",
+            json.dumps({"operation": "list"}),
+        )
+        if not raw:
+            logger.warning("capability catalog fetch failed: no response")
+            return {}
+        try:
+            catalog = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("capability catalog returned invalid JSON")
+            return {}
+        if not catalog.get("ok"):
+            logger.warning(
+                "capability catalog fetch failed: %s",
+                catalog.get("error"),
+            )
+            return {}
+        return catalog
+
     profile: dict = {}
+    location: dict = {}
 
-    # Wait for the Mac participant before any RPC. Tools must be present at
-    # Agent construction (post-start tool mutation is not part of the public
-    # API), but the profile fetch can run concurrently with session.start and
-    # be applied via update_instructions once it arrives.
+    # Wait for the Mac participant before any RPC. Fetch the initial tool set
+    # before Agent construction. Ambient context fetch can run alongside
+    # session.start and be applied through update_instructions when ready.
     await wait_for_mac()
-    tools_list = await fetch_tools()
-    profile_task = asyncio.create_task(rpc_to_mac("get_profile"))
+    primitive_task = asyncio.create_task(fetch_tools())
+    catalog_task = asyncio.create_task(fetch_capability_catalog())
+    context_task = asyncio.create_task(rpc_to_mac("get_context"))
+    primitive_tools, capability_catalog = await asyncio.gather(
+        primitive_task,
+        catalog_task,
+    )
+    supported_capabilities = capability_catalog.get("capabilities") or []
+    capability_tool = build_capability_tool(
+        rpc_to_mac,
+        supported_capabilities,
+    )
+    system_tool = build_system_tool(call_tool)
+    confirmation_tools = [
+        tool for tool in primitive_tools if tool.info.name == "confirm_action"
+    ]
+    fallback_tools = [
+        tool
+        for tool in primitive_tools
+        if tool.info.name not in SYSTEM_PRIMITIVE_NAMES
+        and tool.info.name != "confirm_action"
+    ]
+    tools_list: list[llm.Tool | llm.Toolset] = [
+        capability_tool,
+        system_tool,
+        *confirmation_tools,
+    ]
+    if fallback_tools:
+        tools_list.append(
+            ToolProxyToolset(
+                id="friday_primitives",
+                tools=fallback_tools,
+                max_results=4,
+                search_description=(
+                    "Search Friday's low-level fallback primitives. Use this "
+                    "for weather, file writes, UI inspection, or when the "
+                    "high-level capability tools do not support the task."
+                ),
+                query_description=(
+                    "Describe the exact primitive action you need."
+                ),
+                call_description=(
+                    "Call one primitive returned by tool_search using its "
+                    "exact name and arguments."
+                ),
+            )
+        )
+    logger.info(
+        "exposed capabilities=%s system_controls=%s plus %d proxied primitives",
+        supported_capabilities,
+        sorted(SYSTEM_PRIMITIVE_NAMES),
+        len(fallback_tools),
+    )
 
-    friday_agent = JarvisAgent(
-        instructions=render_instructions(profile),
+    friday_agent = FridayAgent(
+        instructions=render_instructions(profile, location),
         tools=tools_list,
         fast_llm=fast_llm,
         complex_llm=complex_llm,
@@ -326,9 +530,28 @@ async def entrypoint(ctx: JobContext) -> None:
         # Mac forwards the raw event {"type": "profile_updated", "profile": {...}}.
         profile = payload.get("profile", payload) or {}
         try:
-            await friday_agent.update_instructions(render_instructions(profile))
+            friday_agent.update_ambient_context(profile, location)
+            await friday_agent.update_instructions(
+                render_instructions(profile, location)
+            )
         except Exception:
             logger.exception("failed to update agent instructions")
+        return "ok"
+
+    @ctx.room.local_participant.register_rpc_method("location_updated")
+    async def on_location_updated(data: rtc.RpcInvocationData) -> str:
+        nonlocal location
+        try:
+            location = json.loads(data.payload) or {}
+        except json.JSONDecodeError:
+            return "bad payload"
+        try:
+            friday_agent.update_ambient_context(profile, location)
+            await friday_agent.update_instructions(
+                render_instructions(profile, location)
+            )
+        except Exception:
+            logger.exception("failed to update location instructions")
         return "ok"
 
     def cancel_followup() -> None:
@@ -421,11 +644,11 @@ async def entrypoint(ctx: JobContext) -> None:
         session.input.set_audio_enabled(False)
         asyncio.create_task(rearm_mac_after_session_error())
 
-    room_input_options = RoomInputOptions()
+    audio_input_options = room_io.AudioInputOptions()
     await session.start(
         room=ctx.room,
         agent=friday_agent,
-        room_input_options=room_input_options,
+        room_options=room_io.RoomOptions(audio_input=audio_input_options),
     )
 
     # Wrap RoomIO's audio input so pre-roll can be prepended per turn. The
@@ -434,22 +657,29 @@ async def entrypoint(ctx: JobContext) -> None:
     # buffered rather than dropped.
     assert session.input.audio is not None
     gate = PreRollAudioInput(
-        session.input.audio, sample_rate=room_input_options.audio_sample_rate
+        session.input.audio, sample_rate=audio_input_options.sample_rate
     )
     session.input.audio = gate
 
-    # Profile fetch was kicked off in parallel with session.start above; apply
-    # it now so the first user turn has profile-aware instructions. The mic is
-    # gated on activate_turn, so this finishes well before the first turn.
-    raw_profile = await profile_task
-    if raw_profile:
+    # Context fetch was kicked off in parallel with session.start above; apply
+    # it now so the first user turn has profile and location-aware instructions.
+    # The mic is gated on activate_turn.
+    raw_context = await context_task
+    if raw_context:
         try:
-            profile = json.loads(raw_profile)
-            await friday_agent.update_instructions(render_instructions(profile))
+            context = json.loads(raw_context)
+            profile = context.get("profile") or {}
+            location = context.get("location") or {}
         except json.JSONDecodeError:
-            logger.warning("get_profile returned non-JSON: %r", raw_profile)
-        except Exception:
-            logger.exception("failed to apply initial profile")
+            logger.warning("get_context returned non-JSON: %r", raw_context)
+
+    try:
+        friday_agent.update_ambient_context(profile, location)
+        await friday_agent.update_instructions(
+            render_instructions(profile, location)
+        )
+    except Exception:
+        logger.exception("failed to apply initial context")
 
     if os.getenv("FRIDAY_TEST_MODE") == "1":
         logger.info("FRIDAY_TEST_MODE=1 - mic enabled, greeting on connect")

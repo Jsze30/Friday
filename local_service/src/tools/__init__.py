@@ -4,7 +4,15 @@ import importlib
 import logging
 import pkgutil
 
-from .base import REGISTRY, ToolDef, ToolParam, ToolResult, execute, tool
+from .base import (
+    REGISTRY,
+    ToolDef,
+    ToolParam,
+    ToolResult,
+    execute,
+    resolve_confirmation,
+    tool,
+)
 
 log = logging.getLogger("friday.tools")
 
@@ -31,5 +39,6 @@ __all__ = [
     "ToolResult",
     "execute",
     "load_all",
+    "resolve_confirmation",
     "tool",
 ]
