@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 
 from src.capabilities.base import (
+    ActionDefinition,
+    ActionParameter,
+    ActionRoute,
     CapabilityProvider,
     CapabilityRequest,
     CapabilityResult,
@@ -14,7 +17,7 @@ from src.capabilities.base import (
     ProviderInfo,
 )
 from src.capabilities.broker import CapabilityBroker
-from src.capabilities.providers import FileProvider
+from src.capabilities.providers import CommandProvider, FileProvider
 from src.capabilities.runtime import CapabilityRuntime
 
 
@@ -83,7 +86,9 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.summary, "fallback result")
         self.assertEqual(selected, "fallback")
-        self.assertEqual([attempt.status for attempt in attempts], ["failed", "succeeded"])
+        self.assertEqual(
+            [attempt.status for attempt in attempts], ["failed", "succeeded"]
+        )
         self.assertEqual(preferred.calls, 1)
         self.assertEqual(fallback.calls, 1)
 
@@ -99,6 +104,144 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["provider"], "fast")
         self.assertEqual(status["result"]["summary"], "complete")
         await runtime.shutdown()
+
+    async def test_provider_actions_are_discovered_and_run_synchronously(
+        self,
+    ) -> None:
+        provider = FakeProvider(
+            "calendar-provider",
+            priority=100,
+            result="created",
+            permission="low_risk_write",
+        )
+        provider.info = ProviderInfo(
+            provider_id="calendar-provider",
+            name="calendar-provider",
+            description="test provider",
+            capabilities=("calendar",),
+            actions=(
+                ActionDefinition(
+                    action_id="calendar.create_event",
+                    capability="calendar",
+                    operation="create_event",
+                    description="Create a calendar event.",
+                    parameters=(ActionParameter("title", "string", "Event title."),),
+                    routes=(
+                        ActionRoute(r"create\s+(?P<title>.+?)\s+on\s+my\s+calendar"),
+                    ),
+                    permission="low_risk_write",
+                ),
+            ),
+            permission="low_risk_write",
+            priority=100,
+        )
+        runtime = CapabilityRuntime(CapabilityBroker([provider]))
+
+        catalog = await runtime.catalog()
+        result = await runtime.action(
+            "calendar.create_event",
+            "Create lunch on my calendar.",
+            {"title": "lunch"},
+        )
+
+        self.assertEqual(catalog["actions"][0]["id"], "calendar.create_event")
+        self.assertEqual(
+            catalog["actions"][0]["target"],
+            {"kind": "capability", "action": "calendar.create_event"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "calendar-provider")
+        self.assertEqual(provider.calls, 1)
+        await runtime.shutdown()
+
+    async def test_action_arguments_are_validated_before_provider_execution(
+        self,
+    ) -> None:
+        provider = FakeProvider(
+            "volume-provider",
+            priority=100,
+            permission="low_risk_write",
+        )
+        provider.info = ProviderInfo(
+            provider_id="volume-provider",
+            name="volume-provider",
+            description="test provider",
+            capabilities=("audio",),
+            actions=(
+                ActionDefinition(
+                    action_id="audio.set_volume",
+                    capability="audio",
+                    operation="set_volume",
+                    description="Set volume.",
+                    parameters=(
+                        ActionParameter(
+                            "volume",
+                            "integer",
+                            minimum=0,
+                            maximum=100,
+                        ),
+                    ),
+                    permission="low_risk_write",
+                ),
+            ),
+            permission="low_risk_write",
+        )
+        runtime = CapabilityRuntime(CapabilityBroker([provider]))
+
+        result = await runtime.action(
+            "audio.set_volume",
+            "Set volume.",
+            {"volume": 101},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("at most 100", result["error"])
+        self.assertEqual(provider.calls, 0)
+        await runtime.shutdown()
+
+    async def test_configured_integration_can_declare_actions_without_router_code(
+        self,
+    ) -> None:
+        provider = CommandProvider(
+            {
+                "id": "calendar-command",
+                "command": ["/usr/bin/true"],
+                "capabilities": ["calendar"],
+                "permission": "low_risk_write",
+                "actions": [
+                    {
+                        "id": "calendar.create_event",
+                        "capability": "calendar",
+                        "operation": "create_event",
+                        "description": "Create an event.",
+                        "parameters": [
+                            {
+                                "name": "title",
+                                "type": "string",
+                                "required": True,
+                            }
+                        ],
+                        "routes": [
+                            {
+                                "pattern": (
+                                    r"create\s+(?P<title>.+?)"
+                                    r"\s+on\s+my\s+calendar"
+                                )
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            provider.info.actions[0].action_id,
+            "calendar.create_event",
+        )
+        self.assertEqual(
+            provider.info.actions[0].parameters[0].name,
+            "title",
+        )
 
     async def test_music_uses_the_local_low_risk_permission_policy(self) -> None:
         provider = FakeProvider(

@@ -16,6 +16,9 @@ from ..tools.primitives import (
     web_search,
 )
 from .base import (
+    ActionDefinition,
+    ActionParameter,
+    ActionRoute,
     CapabilityProvider,
     CapabilityRequest,
     CapabilityResult,
@@ -27,6 +30,7 @@ from .base import (
 MAX_SOURCE_CHARS = 2_500
 MAX_CODE_RESULT_CHARS = 10_000
 CODE_TIMEOUT_SECONDS = 180
+PERMISSIONS = {"read_only", "low_risk_write", "sensitive"}
 
 
 def _error_from_data(data: dict[str, Any] | None) -> str | None:
@@ -141,9 +145,7 @@ class ResearchProvider(CapabilityProvider):
                 max_chars=MAX_SOURCE_CHARS,
             )
             if not _error_from_data(fetched.data):
-                value["content"] = str(
-                    (fetched.data or {}).get("content") or ""
-                )
+                value["content"] = str((fetched.data or {}).get("content") or "")
             return value
 
         sources = await asyncio.gather(
@@ -152,8 +154,7 @@ class ResearchProvider(CapabilityProvider):
         readable = sum(bool(source.get("content")) for source in sources)
         return CapabilityResult(
             summary=(
-                f"Found {len(sources)} sources for {query} "
-                f"and read {readable} of them."
+                f"Found {len(sources)} sources for {query} and read {readable} of them."
             ),
             data={
                 "query": query,
@@ -320,17 +321,25 @@ class CommandProvider(CapabilityProvider):
             isinstance(item, str) and item for item in capabilities
         ):
             raise ValueError("external provider capabilities must be a string array")
+        permission = str(config.get("permission") or "read_only")
+        if permission not in PERMISSIONS:
+            raise ValueError("external provider permission is invalid")
+        actions = _configured_actions(
+            config.get("actions"),
+            set(capabilities),
+            permission,
+        )
         self._command = tuple(command)
         provider_id = str(config.get("id") or command[0])
         self.info = ProviderInfo(
             provider_id=provider_id,
             name=str(config.get("name") or provider_id),
             description=str(
-                config.get("description")
-                or "Configured external capability provider."
+                config.get("description") or "Configured external capability provider."
             ),
             capabilities=tuple(capabilities),
-            permission="read_only",
+            actions=actions,
+            permission=permission,
             priority=int(config.get("priority") or 50),
             reliability=float(config.get("reliability") or 0.8),
             latency=int(config.get("latency") or 2),
@@ -389,15 +398,113 @@ class CommandProvider(CapabilityProvider):
         try:
             value = json.loads(stdout)
         except json.JSONDecodeError as error:
-            raise ProviderFailed(
-                f"{self.info.name} returned invalid JSON"
-            ) from error
+            raise ProviderFailed(f"{self.info.name} returned invalid JSON") from error
         if not isinstance(value, dict):
             raise ProviderFailed(f"{self.info.name} returned a non-object")
         return CapabilityResult(
             summary=str(value.get("summary") or f"{self.info.name} finished."),
             data=value.get("data") if isinstance(value.get("data"), dict) else value,
         )
+
+
+def _configured_actions(
+    value: Any,
+    capabilities: set[str],
+    provider_permission: str,
+) -> tuple[ActionDefinition, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise TypeError("external provider actions must be an array")
+    actions: list[ActionDefinition] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise TypeError("external provider action must be an object")
+        action_id = str(raw.get("id") or "").strip().casefold()
+        capability = str(raw.get("capability") or "").strip().casefold()
+        if not action_id or not capability:
+            raise ValueError("external provider actions require id and capability")
+        if capability not in capabilities:
+            raise ValueError(f"external action capability {capability} is not declared")
+        permission = str(raw.get("permission") or provider_permission)
+        if permission not in PERMISSIONS:
+            raise ValueError(f"external action {action_id} permission is invalid")
+        parameters = raw.get("parameters") or []
+        routes = raw.get("routes") or []
+        if not isinstance(parameters, list) or not isinstance(routes, list):
+            raise TypeError(
+                f"external action {action_id} parameters and routes must be arrays"
+            )
+        actions.append(
+            ActionDefinition(
+                action_id=action_id,
+                capability=capability,
+                operation=str(raw.get("operation") or action_id.rsplit(".", 1)[-1]),
+                description=str(raw.get("description") or action_id),
+                parameters=tuple(
+                    _configured_action_parameter(action_id, parameter)
+                    for parameter in parameters
+                ),
+                routes=tuple(
+                    _configured_action_route(action_id, route) for route in routes
+                ),
+                permission=permission,
+                latency_ms=max(0, int(raw.get("latency_ms") or 500)),
+                priority=int(raw.get("priority") or 50),
+            )
+        )
+    return tuple(actions)
+
+
+def _configured_action_parameter(
+    action_id: str,
+    raw: Any,
+) -> ActionParameter:
+    if not isinstance(raw, dict):
+        raise TypeError(f"external action {action_id} parameter must be an object")
+    name = str(raw.get("name") or "").strip()
+    parameter_type = str(raw.get("type") or "string")
+    if not name or parameter_type not in {"string", "integer", "number", "boolean"}:
+        raise ValueError(f"external action {action_id} parameter is invalid")
+    choices = raw.get("choices") or []
+    if not isinstance(choices, list) or not all(
+        isinstance(choice, str) for choice in choices
+    ):
+        raise ValueError(
+            f"external action {action_id} parameter choices must be strings"
+        )
+    minimum = raw.get("minimum")
+    maximum = raw.get("maximum")
+    if minimum is not None and not isinstance(minimum, (int, float)):
+        raise ValueError(
+            f"external action {action_id} parameter minimum must be a number"
+        )
+    if maximum is not None and not isinstance(maximum, (int, float)):
+        raise ValueError(
+            f"external action {action_id} parameter maximum must be a number"
+        )
+    return ActionParameter(
+        name=name,
+        type=parameter_type,
+        description=str(raw.get("description") or ""),
+        required=bool(raw.get("required", True)),
+        minimum=minimum,
+        maximum=maximum,
+        choices=tuple(choices),
+    )
+
+
+def _configured_action_route(
+    action_id: str,
+    raw: Any,
+) -> ActionRoute:
+    if not isinstance(raw, dict):
+        raise TypeError(f"external action {action_id} route must be an object")
+    pattern = str(raw.get("pattern") or "")
+    arguments = raw.get("arguments") or {}
+    if not pattern or not isinstance(arguments, dict):
+        raise ValueError(f"external action {action_id} route is invalid")
+    return ActionRoute(pattern=pattern, fixed_arguments=arguments)
 
 
 def configured_command_providers() -> list[CommandProvider]:

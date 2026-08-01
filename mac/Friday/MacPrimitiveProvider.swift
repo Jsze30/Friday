@@ -7,12 +7,6 @@ import Foundation
 final class MacPrimitiveProvider {
     static let shared = MacPrimitiveProvider()
 
-    private struct PendingAction {
-        let tool: String
-        let arguments: [String: Any]
-        let createdAt: Date
-    }
-
     private struct AudioState {
         let volume: Int
         let muted: Bool
@@ -30,9 +24,7 @@ final class MacPrimitiveProvider {
         }
     }
 
-    private let confirmationLifetime: TimeInterval = 60
     private let maximumRPCBytes = 14_000
-    private var pendingActions: [String: PendingAction] = [:]
     private var elementCache: [String: AXUIElement] = [:]
 
     private init() {}
@@ -67,6 +59,32 @@ final class MacPrimitiveProvider {
                         "required": false,
                     ]
                 ],
+                "actions": [
+                    [
+                        "id": "system.list_apps",
+                        "description": "List installed or running Mac applications.",
+                        "parameters": [
+                            [
+                                "name": "running_only",
+                                "type": "boolean",
+                                "description": "Return only running apps.",
+                                "required": false,
+                            ]
+                        ],
+                        "routes": [
+                            [
+                                "pattern": #"list\s+(?:the\s+)?running\s+apps"#,
+                                "arguments": ["running_only": true],
+                            ],
+                            [
+                                "pattern": #"list\s+(?:the\s+)?apps"#,
+                                "arguments": ["running_only": false],
+                            ],
+                        ],
+                        "latencyMs": 100,
+                        "priority": 110,
+                    ]
+                ],
             ],
             [
                 "name": "open_app",
@@ -81,6 +99,19 @@ final class MacPrimitiveProvider {
                         "type": "string",
                         "description": "Application name such as Spotify or bundle identifier.",
                         "required": true,
+                    ]
+                ],
+                "actions": [
+                    [
+                        "id": "system.open_app",
+                        "description": "Launch or focus a named Mac application.",
+                        "routes": [
+                            [
+                                "pattern": #"(?:open|launch|focus|activate)\s+(?:the\s+)?(?P<app>[\w .'-]+)"#,
+                            ]
+                        ],
+                        "latencyMs": 150,
+                        "priority": 100,
                     ]
                 ],
             ],
@@ -106,21 +137,46 @@ final class MacPrimitiveProvider {
                         "required": false,
                     ],
                 ],
+                "actions": [
+                    [
+                        "id": "system.open_url",
+                        "description": "Open a web URL in a browser.",
+                        "routes": [
+                            [
+                                "pattern": #"(?:open|visit|go\s+to)\s+(?P<url>(?:https?://|www\.)\S+?)(?:\s+(?:in|with|using)\s+(?P<browser>[\w .'-]+))?"#,
+                            ]
+                        ],
+                        "latencyMs": 150,
+                        "priority": 140,
+                    ]
+                ],
             ],
             [
                 "name": "quit_app",
                 "description": """
-                Gracefully ask one running Mac application to quit. This may \
-                close windows with unsaved work, so it always requires explicit \
-                confirmation. This does not force quit the application.
+                Gracefully ask one running Mac application to quit immediately. \
+                This does not force quit the application.
                 """,
-                "permission": "sensitive",
+                "permission": "low_risk_write",
                 "parameters": [
                     [
                         "name": "app",
                         "type": "string",
                         "description": "Running application name or bundle identifier.",
                         "required": true,
+                    ]
+                ],
+                "actions": [
+                    [
+                        "id": "system.quit_app",
+                        "description": "Gracefully quit a named Mac application.",
+                        "routes": [
+                            [
+                                "pattern": #"(?:quit|close)\s+(?:the\s+)?(?P<app>[\w .'-]+)"#,
+                            ]
+                        ],
+                        "latencyMs": 150,
+                        "priority": 110,
                     ]
                 ],
             ],
@@ -132,6 +188,19 @@ final class MacPrimitiveProvider {
                 """,
                 "permission": "read_only",
                 "parameters": [],
+                "actions": [
+                    [
+                        "id": "system.get_volume",
+                        "description": "Read the Mac output volume and mute state.",
+                        "routes": [
+                            [
+                                "pattern": #"(?:what(?:'s|\s+is)\s+)?(?:the\s+)?(?:mac\s+)?volume(?:\s+level)?"#,
+                            ]
+                        ],
+                        "latencyMs": 50,
+                        "priority": 120,
+                    ]
+                ],
             ],
             [
                 "name": "set_volume",
@@ -148,6 +217,29 @@ final class MacPrimitiveProvider {
                         "required": true,
                     ]
                 ],
+                "actions": [
+                    [
+                        "id": "system.set_volume",
+                        "description": "Set the Mac output volume.",
+                        "parameters": [
+                            [
+                                "name": "volume",
+                                "type": "integer",
+                                "description": "Exact output volume from 0 to 100.",
+                                "required": true,
+                                "minimum": 0,
+                                "maximum": 100,
+                            ]
+                        ],
+                        "routes": [
+                            [
+                                "pattern": #"(?:set|change)\s+(?:the\s+)?(?:mac\s+)?volume\s+(?:to\s+)?(?P<volume>\d{1,3})(?:\s*%)?"#,
+                            ]
+                        ],
+                        "latencyMs": 50,
+                        "priority": 120,
+                    ]
+                ],
             ],
             [
                 "name": "mute_audio",
@@ -162,6 +254,32 @@ final class MacPrimitiveProvider {
                         "type": "boolean",
                         "description": "True to mute or false to unmute.",
                         "required": true,
+                    ]
+                ],
+                "actions": [
+                    [
+                        "id": "system.mute",
+                        "description": "Mute or unmute Mac audio.",
+                        "parameters": [
+                            [
+                                "name": "muted",
+                                "type": "boolean",
+                                "description": "True to mute or false to unmute.",
+                                "required": true,
+                            ]
+                        ],
+                        "routes": [
+                            [
+                                "pattern": #"mute(?:\s+(?:the\s+)?(?:mac|audio|sound|volume))?"#,
+                                "arguments": ["muted": true],
+                            ],
+                            [
+                                "pattern": #"unmute(?:\s+(?:the\s+)?(?:mac|audio|sound|volume))?"#,
+                                "arguments": ["muted": false],
+                            ],
+                        ],
+                        "latencyMs": 50,
+                        "priority": 120,
                     ]
                 ],
             ],
@@ -195,10 +313,9 @@ final class MacPrimitiveProvider {
                 "description": """
                 Perform one generic Accessibility action on an element returned by \
                 inspect_ui. Use an advertised AX action such as AXPress, or use \
-                set_value, type_text, or focus. This is sensitive and always \
-                requires explicit confirmation.
+                set_value, type_text, or focus. Execute immediately when requested.
                 """,
-                "permission": "sensitive",
+                "permission": "low_risk_write",
                 "parameters": [
                     [
                         "name": "element_id",
@@ -236,26 +353,6 @@ final class MacPrimitiveProvider {
         let arguments = payload["arguments"] as? [String: Any] ?? [:]
         NSLog("[Friday/mac-tools] tool_call name=%@", tool)
 
-        if tool == "interact_ui" || tool == "quit_app" {
-            discardExpiredActions()
-            let confirmationID = "mac:\(UUID().uuidString)"
-            pendingActions[confirmationID] = PendingAction(
-                tool: tool,
-                arguments: arguments,
-                createdAt: Date()
-            )
-            return envelope(
-                spoken: confirmationMessage(for: tool, arguments: arguments),
-                data: [
-                    "tool": tool,
-                    "arguments": preview(arguments),
-                    "expiresInSeconds": Int(confirmationLifetime),
-                ],
-                needsConfirmation: true,
-                confirmationID: confirmationID
-            )
-        }
-
         switch tool {
         case "list_apps":
             return listApps(arguments: arguments)
@@ -263,6 +360,8 @@ final class MacPrimitiveProvider {
             return openApp(arguments: arguments)
         case "open_url":
             return await openURL(arguments: arguments)
+        case "quit_app":
+            return await quitApp(arguments: arguments)
         case "get_volume":
             return getVolume()
         case "set_volume":
@@ -271,40 +370,10 @@ final class MacPrimitiveProvider {
             return muteAudio(arguments: arguments)
         case "inspect_ui":
             return inspectUI(arguments: arguments)
+        case "interact_ui":
+            return interactUI(arguments: arguments)
         default:
             return envelope(ok: false, error: "unknown Mac primitive: \(tool)")
-        }
-    }
-
-    func confirm(jsonPayload: String) async -> String {
-        guard let payload = decodeObject(jsonPayload),
-              let arguments = payload["arguments"] as? [String: Any],
-              let confirmationID = arguments["confirmation_id"] as? String,
-              let approve = arguments["approve"] as? Bool else {
-            return envelope(ok: false, error: "confirmation_id and approve are required")
-        }
-
-        discardExpiredActions()
-        guard let pending = pendingActions.removeValue(forKey: confirmationID) else {
-            return envelope(
-                spoken: "That confirmation has expired or does not exist.",
-                data: ["error": "unknown_confirmation"]
-            )
-        }
-        guard approve else {
-            return envelope(
-                spoken: "Cancelled.",
-                data: ["cancelled": true, "tool": pending.tool]
-            )
-        }
-
-        switch pending.tool {
-        case "quit_app":
-            return await quitApp(arguments: pending.arguments)
-        case "interact_ui":
-            return interactUI(arguments: pending.arguments)
-        default:
-            return envelope(ok: false, error: "confirmed Mac action is unavailable")
         }
     }
 
@@ -784,17 +853,6 @@ final class MacPrimitiveProvider {
         )
     }
 
-    private func confirmationMessage(
-        for tool: String,
-        arguments: [String: Any]
-    ) -> String {
-        if tool == "quit_app" {
-            let app = arguments["app"] as? String ?? "that app"
-            return "I need confirmation before I quit \(app)."
-        }
-        return "I need confirmation before I interact with that control."
-    }
-
     private func inspectUI(arguments: [String: Any]) -> String {
         guard AXIsProcessTrusted() else {
             requestAccessibilityPermission()
@@ -1146,16 +1204,12 @@ final class MacPrimitiveProvider {
         ok: Bool = true,
         spoken: String? = nil,
         data: [String: Any]? = nil,
-        needsConfirmation: Bool = false,
-        confirmationID: String? = nil,
         error: String? = nil
     ) -> String {
         let object: [String: Any] = [
             "ok": ok,
             "spoken": spoken ?? NSNull(),
             "data": data ?? NSNull(),
-            "needsConfirmation": needsConfirmation,
-            "confirmationId": confirmationID ?? NSNull(),
             "error": error ?? NSNull(),
         ]
         guard JSONSerialization.isValidJSONObject(object),
@@ -1168,17 +1222,4 @@ final class MacPrimitiveProvider {
         return String(data: encoded, encoding: .utf8) ?? #"{"ok":false}"#
     }
 
-    private func preview(_ arguments: [String: Any]) -> [String: Any] {
-        arguments.mapValues { value in
-            guard let string = value as? String, string.count > 300 else {
-                return value
-            }
-            return String(string.prefix(300)) + "..."
-        }
-    }
-
-    private func discardExpiredActions() {
-        let cutoff = Date().addingTimeInterval(-confirmationLifetime)
-        pendingActions = pendingActions.filter { $0.value.createdAt >= cutoff }
-    }
 }

@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterable
 from datetime import datetime
 from pathlib import Path
@@ -27,9 +28,10 @@ from livekit.agents.beta.toolsets import ToolProxyToolset
 from livekit.plugins import anthropic, deepgram, openai, silero
 from openai.types import Reasoning as OpenAIReasoning
 
+from action_catalog import ActionCatalog, merge_action_manifests
+from action_tool import build_action_tool
 from capability_tool import build_capability_tool
-from model_router import route_request
-from system_tool import SYSTEM_PRIMITIVE_NAMES, build_system_tool
+from model_router import deterministic_tool_route, route_request
 from turn_gate import PreRollAudioInput, PreRollReceiver
 
 FOLLOWUP_SECONDS = 5.0
@@ -55,14 +57,14 @@ Speak naturally and concisely. Avoid markdown, lists, or special characters -
 your replies are spoken aloud. Default to one or two short sentences unless the
 user explicitly asks for detail.
 
-You have a high-level capability runner plus discoverable fallback primitives.
-Use run_capability first for file search and reading, web research, exact web
-pages, and coding analysis. It automatically chooses and retries providers. Use
-control_mac directly for opening, focusing, listing, or quitting apps, opening
-web URLs in a browser, and reading or changing volume and mute state. Use
-tool_search and call_tool for other direct primitives, weather, and operations
-that the high-level tools do not support. Do not claim you cannot inspect
-something until you have tried the relevant capability or read-only primitive.
+You have a fast action runner, a high-level capability runner, and discoverable
+fallback primitives. Use run_action for clear operations supported by the
+shared action catalog. Actions are declared by integrations and execute through
+the fastest available provider. Use run_capability when the request requires
+reasoning, discovery, or several steps. Use tool_search and call_tool only for
+low-level operations that the action and capability layers do not support. Do
+not claim you cannot inspect or control something until you have tried the
+relevant action, capability, or read-only primitive.
 
 Important mappings and workflows:
 - For run_capability inputs_json, pass a JSON object as a string.
@@ -71,17 +73,8 @@ Important mappings and workflows:
 - For broad research, use capability research with the query in inputs_json.
 - To read one known URL, use capability web with the URL in inputs_json.
 - For repository questions, use capability coding. It is read-only.
-- For Spotify, use capability music. Pass action as connect, status, play,
-  pause, next, previous, queue, shuffle, repeat, volume, list_playlists,
-  playlist_tracks, open_playlist, or play_playlist. For a named song, pass
-  action play and put the song and artist in query. For a named playlist, put
-  its spoken name in playlist. Use open_playlist to reveal it in Spotify and
-  play_playlist to begin playback. Do not use UI inspection or AppleScript for
-  Spotify actions supported by music.
-- For common app, browser URL, and audio actions, call control_mac directly.
-  Use open_url to open an HTTP or HTTPS URL in Arc by default, or pass another
-  installed browser name when the user requests it. Do not inspect the UI or use
-  AppleScript for an action supported by control_mac.
+- Prefer a registered action over UI inspection, AppleScript, or a generic
+  capability whenever the action catalog supports the request.
 - For current weather, use the ambient latitude and longitude with fetch_url and
   Open-Meteo's forecast endpoint through the fallback primitive search. Request current temperature, apparent
   temperature, weather code, and wind, use timezone=auto, and honor the user's
@@ -93,12 +86,8 @@ Important mappings and workflows:
   coordinates only if the user asks for coordinates.
 
 Tool results contain structured data. Read that data and answer from it instead
-of repeating the tool's short status message.
-
-Sensitive tools report that confirmation is required before they execute. Explain
-the exact proposed action and stop. Call confirm_action only after the user
-explicitly approves or rejects that pending action. Never treat silence,
-ambiguity, or an earlier approval as confirmation."""
+of repeating the tool's short status message. Actions execute immediately when
+the user requests them. Do not ask the user to confirm an action."""
 
 PARAM_TYPE_MAP: dict[str, Any] = {
     "string": str,
@@ -107,6 +96,17 @@ PARAM_TYPE_MAP: dict[str, Any] = {
     "boolean": bool,
     "array": list[str],
 }
+
+
+def matching_route_tools(
+    tools: list[llm.Tool],
+    tool_name: str,
+) -> list[llm.Tool]:
+    return [
+        tool
+        for tool in tools
+        if getattr(getattr(tool, "info", None), "name", None) == tool_name
+    ]
 
 
 def render_instructions(
@@ -158,6 +158,7 @@ class FridayAgent(Agent):
         tools: list[llm.Tool | llm.Toolset],
         fast_llm: llm.LLM,
         complex_llm: llm.LLM,
+        action_catalog: ActionCatalog | None = None,
         complex_extra_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -167,6 +168,7 @@ class FridayAgent(Agent):
         )
         self._fast_llm = fast_llm
         self._complex_llm = complex_llm
+        self._action_catalog = action_catalog or ActionCatalog()
         self._complex_extra_kwargs = complex_extra_kwargs or {}
         self._timezone = ZoneInfo("UTC")
 
@@ -191,6 +193,13 @@ class FridayAgent(Agent):
                 return item.text_content
         return None
 
+    @staticmethod
+    def _is_initial_user_inference(chat_ctx: llm.ChatContext) -> bool:
+        if not chat_ctx.items:
+            return False
+        latest = chat_ctx.items[-1]
+        return isinstance(latest, llm.ChatMessage) and latest.role == "user"
+
     async def llm_node(
         self,
         chat_ctx: llm.ChatContext,
@@ -198,13 +207,46 @@ class FridayAgent(Agent):
         model_settings: ModelSettings,
     ) -> AsyncIterable[llm.ChatChunk]:
         user_text = self._latest_user_text(chat_ctx)
-        decision = route_request(user_text)
+        deterministic_route = (
+            deterministic_tool_route(user_text, self._action_catalog)
+            if self._is_initial_user_inference(chat_ctx)
+            else None
+        )
+        if deterministic_route:
+            matching_tools = matching_route_tools(
+                tools,
+                deterministic_route.tool_name,
+            )
+            if matching_tools:
+                logger.info(
+                    "tool_route tool=%s reason=%s model=none",
+                    deterministic_route.tool_name,
+                    deterministic_route.reason,
+                )
+                yield llm.ChatChunk(
+                    id=f"friday-action-{uuid.uuid4().hex}",
+                    delta=llm.ChoiceDelta(
+                        role="assistant",
+                        tool_calls=[
+                            llm.FunctionToolCall(
+                                name=deterministic_route.tool_name,
+                                arguments=json.dumps(deterministic_route.arguments),
+                                call_id=f"call-{uuid.uuid4().hex}",
+                            )
+                        ],
+                    ),
+                )
+                return
+            logger.warning(
+                "deterministic tool %s is unavailable",
+                deterministic_route.tool_name,
+            )
+
+        decision = route_request(user_text, self._action_catalog)
         selected_llm = (
             self._complex_llm if decision.route == "complex" else self._fast_llm
         )
-        extra_kwargs = (
-            self._complex_extra_kwargs if decision.route == "complex" else {}
-        )
+        extra_kwargs = self._complex_extra_kwargs if decision.route == "complex" else {}
 
         logger.info(
             "llm_route route=%s model=%s reason=%s",
@@ -308,7 +350,11 @@ async def entrypoint(ctx: JobContext) -> None:
         for p in ctx.room.remote_participants.values():
             if p.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
                 ident = p.identity
-                return ident if isinstance(ident, str) else getattr(ident, "stringValue", None) or str(ident)
+                return (
+                    ident
+                    if isinstance(ident, str)
+                    else getattr(ident, "stringValue", None) or str(ident)
+                )
         return None
 
     def mac_rpc_ready() -> bool:
@@ -317,10 +363,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 return p.attributes.get("friday.rpcReady") == "true"
         return False
 
-    async def rpc_to_mac(method: str, payload: str = "") -> str | None:
+    async def rpc_to_mac(
+        method: str,
+        payload: str = "",
+        *,
+        log_failure: bool = True,
+    ) -> str | None:
         identity = mac_identity()
         if not identity:
-            logger.warning("no mac participant for rpc %s", method)
+            if log_failure:
+                logger.warning("no mac participant for rpc %s", method)
             return None
         try:
             return await ctx.room.local_participant.perform_rpc(
@@ -331,7 +383,8 @@ async def entrypoint(ctx: JobContext) -> None:
         # LiveKit RPC can surface transport, timeout, or participant errors
         # from several SDK exception families.
         except Exception as e:  # noqa: BLE001
-            logger.warning("rpc %s failed: %s", method, e)
+            if log_failure:
+                logger.warning("rpc %s failed: %s", method, e)
             return None
 
     async def wait_for_mac(timeout: float = 15.0) -> None:
@@ -342,8 +395,39 @@ async def entrypoint(ctx: JobContext) -> None:
             await asyncio.sleep(0.1)
         logger.warning("mac participant did not signal RPC readiness before timeout")
 
-    async def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        raw = await rpc_to_mac(
+    async def startup_rpc(method: str, payload: str = "") -> str | None:
+        attempts = 3
+        for attempt in range(attempts):
+            raw = await rpc_to_mac(
+                method,
+                payload,
+                log_failure=attempt == attempts - 1,
+            )
+            if raw:
+                if attempt:
+                    logger.info(
+                        "startup rpc %s succeeded on attempt %d",
+                        method,
+                        attempt + 1,
+                    )
+                return raw
+            if attempt < attempts - 1:
+                logger.info(
+                    "startup rpc %s unavailable on attempt %d; retrying",
+                    method,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0.25 * (2**attempt))
+        return None
+
+    async def call_tool(
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        rpc = startup_rpc if startup else rpc_to_mac
+        raw = await rpc(
             "tool_call",
             json.dumps({"tool": tool_name, "arguments": arguments}),
         )
@@ -383,19 +467,12 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _proxy(**kwargs: Any) -> str:
             logger.info("tool_call name=%s", tool_name)
             envelope = await call_tool(tool_name, kwargs)
-            logger.info(
-                "tool_result name=%s ok=%s confirmation=%s",
-                tool_name,
-                envelope.get("ok"),
-                envelope.get("needsConfirmation", False),
-            )
+            logger.info("tool_result name=%s ok=%s", tool_name, envelope.get("ok"))
             if not envelope.get("ok"):
                 return envelope.get("error") or f"{tool_name} failed"
             result = {
                 "message": envelope.get("spoken"),
                 "data": envelope.get("data"),
-                "needsConfirmation": envelope.get("needsConfirmation", False),
-                "confirmationId": envelope.get("confirmationId"),
             }
             return json.dumps(
                 {key: value for key, value in result.items() if value is not None}
@@ -408,11 +485,11 @@ async def entrypoint(ctx: JobContext) -> None:
         _proxy.__annotations__ = annotations
         return _proxy
 
-    async def fetch_tools() -> list:
-        envelope = await call_tool("__list__", {})
+    async def fetch_tools() -> tuple[list, list[dict[str, Any]]]:
+        envelope = await call_tool("__list__", {}, startup=True)
         if not envelope.get("ok"):
             logger.warning("tool list fetch failed: %s", envelope.get("error"))
-            return []
+            return [], []
         manifests = (envelope.get("data") or {}).get("tools") or []
         built = []
         for m in manifests:
@@ -427,11 +504,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             except Exception:
                 logger.exception("failed to build tool %s", m.get("name"))
-        logger.info("registered %d tools: %s", len(built), [m["name"] for m in manifests])
-        return built
+        logger.info(
+            "registered %d tools: %s", len(built), [m["name"] for m in manifests]
+        )
+        return built, manifests
 
     async def fetch_capability_catalog() -> dict[str, Any]:
-        raw = await rpc_to_mac(
+        raw = await startup_rpc(
             "capability_call",
             json.dumps({"operation": "list"}),
         )
@@ -455,35 +534,30 @@ async def entrypoint(ctx: JobContext) -> None:
     location: dict = {}
 
     # Wait for the Mac participant before any RPC. Fetch the initial tool set
-    # before Agent construction. Ambient context fetch can run alongside
-    # session.start and be applied through update_instructions when ready.
+    # and capability catalog one at a time before Agent construction. LiveKit
+    # RPC startup is more reliable when the Mac receives one request at a time.
+    # Ambient context can then load alongside session.start.
     await wait_for_mac()
-    primitive_task = asyncio.create_task(fetch_tools())
-    catalog_task = asyncio.create_task(fetch_capability_catalog())
-    context_task = asyncio.create_task(rpc_to_mac("get_context"))
-    primitive_tools, capability_catalog = await asyncio.gather(
-        primitive_task,
-        catalog_task,
-    )
+    primitive_tools, primitive_manifests = await fetch_tools()
+    capability_catalog = await fetch_capability_catalog()
+    context_task = asyncio.create_task(startup_rpc("get_context"))
     supported_capabilities = capability_catalog.get("capabilities") or []
     capability_tool = build_capability_tool(
         rpc_to_mac,
         supported_capabilities,
     )
-    system_tool = build_system_tool(call_tool)
-    confirmation_tools = [
-        tool for tool in primitive_tools if tool.info.name == "confirm_action"
-    ]
-    fallback_tools = [
-        tool
-        for tool in primitive_tools
-        if tool.info.name not in SYSTEM_PRIMITIVE_NAMES
-        and tool.info.name != "confirm_action"
-    ]
+    action_catalog = ActionCatalog(
+        merge_action_manifests(capability_catalog, primitive_manifests)
+    )
+    action_tool = build_action_tool(
+        rpc_to_mac,
+        call_tool,
+        action_catalog,
+    )
+    fallback_tools = primitive_tools
     tools_list: list[llm.Tool | llm.Toolset] = [
+        action_tool,
         capability_tool,
-        system_tool,
-        *confirmation_tools,
     ]
     if fallback_tools:
         tools_list.append(
@@ -496,9 +570,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     "for weather, file writes, UI inspection, or when the "
                     "high-level capability tools do not support the task."
                 ),
-                query_description=(
-                    "Describe the exact primitive action you need."
-                ),
+                query_description=("Describe the exact primitive action you need."),
                 call_description=(
                     "Call one primitive returned by tool_search using its "
                     "exact name and arguments."
@@ -506,9 +578,9 @@ async def entrypoint(ctx: JobContext) -> None:
             )
         )
     logger.info(
-        "exposed capabilities=%s system_controls=%s plus %d proxied primitives",
+        "exposed actions=%s capabilities=%s plus %d proxied primitives",
+        action_catalog.action_ids,
         supported_capabilities,
-        sorted(SYSTEM_PRIMITIVE_NAMES),
         len(fallback_tools),
     )
 
@@ -517,6 +589,7 @@ async def entrypoint(ctx: JobContext) -> None:
         tools=tools_list,
         fast_llm=fast_llm,
         complex_llm=complex_llm,
+        action_catalog=action_catalog,
         complex_extra_kwargs=complex_extra_kwargs,
     )
 
@@ -675,9 +748,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     try:
         friday_agent.update_ambient_context(profile, location)
-        await friday_agent.update_instructions(
-            render_instructions(profile, location)
-        )
+        await friday_agent.update_instructions(render_instructions(profile, location))
     except Exception:
         logger.exception("failed to apply initial context")
 

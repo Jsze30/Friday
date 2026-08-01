@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
+
+from action_catalog import ActionCatalog
 
 ModelRoute = Literal["fast", "complex"]
 
@@ -57,37 +60,6 @@ _COMPLEX_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _LONG_REQUEST_WORDS = 45
 
-_SIMPLE_SYSTEM_PATTERN = re.compile(
-    r"^(?:(?:please|(?:can|could|would)\s+you)\s+)?(?:"
-    r"(?:open|visit|go\s+to)\s+(?:https?://|www\.)\S+"
-    r"(?:\s+(?:in|with|using)\s+[\w .'-]+)?|"
-    r"(?:open|launch|focus|activate|quit|close)\s+(?:the\s+)?[\w .'-]+|"
-    r"(?:set|change|turn)\s+(?:the\s+)?(?:mac\s+)?volume\s+(?:to\s+)?\d{1,3}|"
-    r"(?:raise|increase|lower|decrease|turn\s+up|turn\s+down)\s+"
-    r"(?:the\s+)?(?:mac\s+)?volume|"
-    r"(?:mute|unmute)\s+(?:the\s+)?(?:mac|audio|sound|volume)?|"
-    r"(?:what(?:'s| is)\s+)?(?:the\s+)?(?:mac\s+)?volume(?:\s+level)?|"
-    r"list\s+(?:the\s+)?(?:running\s+)?apps"
-    r")[.!?]?$",
-    re.IGNORECASE,
-)
-
-_SIMPLE_MUSIC_PATTERN = re.compile(
-    r"^(?:(?:please|(?:can|could|would)\s+you)\s+)?(?:"
-    r"(?:play|pause|resume)\b.+|"
-    r"(?:open|show|list|browse)\b.+\bplaylists?\b|"
-    r"(?:what|which)\s+(?:songs|tracks)\b.+\bplaylists?\b|"
-    r"look\s+(?:through|in)\b.+\bplaylists?\b|"
-    r"(?:skip|next|previous)(?:\s+(?:song|track))?|"
-    r"(?:what(?:'s| is)\s+(?:currently\s+)?playing)|"
-    r"(?:what\s+(?:song|track)\s+is\s+(?:this|playing))|"
-    r"(?:add|queue)\b.+|"
-    r"(?:turn\s+)?shuffle\s+(?:on|off)|"
-    r"(?:set\s+)?spotify\s+volume\s+(?:to\s+)?\d{1,3}"
-    r")[.!?]?$",
-    re.IGNORECASE,
-)
-
 _TOOL_REQUEST_PATTERN = re.compile(
     r"\b(?:"
     r"weather|forecast|search|look\s+up|find|open|launch|"
@@ -106,11 +78,44 @@ class RouteDecision:
     reason: str
 
 
-def route_request(text: str | None) -> RouteDecision:
+@dataclass(frozen=True)
+class DeterministicToolRoute:
+    tool_name: str
+    arguments: dict[str, Any]
+    reason: str
+
+
+def deterministic_tool_route(
+    text: str | None,
+    action_catalog: ActionCatalog | None = None,
+) -> DeterministicToolRoute | None:
+    """Map a clear command through provider-declared action routes."""
+    if action_catalog is None:
+        return None
+    match = action_catalog.match(text)
+    if match is None:
+        return None
+    return DeterministicToolRoute(
+        tool_name="run_action",
+        arguments={
+            "action": match.action_id,
+            "arguments_json": json.dumps(match.arguments),
+        },
+        reason=match.reason,
+    )
+
+
+def route_request(
+    text: str | None,
+    action_catalog: ActionCatalog | None = None,
+) -> RouteDecision:
     """Route a user request without making another model call."""
     normalized = " ".join((text or "").split())
     if not normalized:
         return RouteDecision("fast", "no user text")
+
+    if action_catalog and action_catalog.match(normalized):
+        return RouteDecision("fast", "deterministic catalog action")
 
     word_count = len(normalized.split())
     if word_count >= _LONG_REQUEST_WORDS:
@@ -122,12 +127,6 @@ def route_request(text: str | None) -> RouteDecision:
     for reason, pattern in _COMPLEX_PATTERNS:
         if pattern.search(normalized):
             return RouteDecision("complex", reason)
-
-    if _SIMPLE_MUSIC_PATTERN.fullmatch(normalized):
-        return RouteDecision("fast", "simple music control")
-
-    if _SIMPLE_SYSTEM_PATTERN.fullmatch(normalized):
-        return RouteDecision("fast", "simple Mac control")
 
     if _TOOL_REQUEST_PATTERN.search(normalized):
         return RouteDecision("complex", "computer or web action")

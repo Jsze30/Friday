@@ -2,14 +2,39 @@ from __future__ import annotations
 
 import unittest
 
-from agent import BASE_INSTRUCTIONS, FridayAgent, render_instructions
+from livekit.agents import function_tool
+
+from agent import (
+    BASE_INSTRUCTIONS,
+    FridayAgent,
+    matching_route_tools,
+    render_instructions,
+)
 
 
 class AgentContextTests(unittest.TestCase):
     def test_identity_is_friday(self) -> None:
         self.assertIn("Your name is Friday.", BASE_INSTRUCTIONS)
         self.assertNotIn("Jarvis", BASE_INSTRUCTIONS)
+        self.assertNotIn("confirm_action", BASE_INSTRUCTIONS)
         self.assertEqual(FridayAgent.__name__, "FridayAgent")
+
+    def test_deterministic_route_exposes_only_the_selected_tool(self) -> None:
+        async def run_action() -> str:
+            return "action"
+
+        async def run_capability() -> str:
+            return "capability"
+
+        selected = matching_route_tools(
+            [
+                function_tool(run_action),
+                function_tool(run_capability),
+            ],
+            "run_action",
+        )
+
+        self.assertEqual([tool.info.name for tool in selected], ["run_action"])
 
     def test_live_location_replaces_saved_location_memory(self) -> None:
         instructions = render_instructions(

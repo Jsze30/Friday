@@ -10,7 +10,6 @@ from .base import (
     ToolParam,
     ToolResult,
     execute,
-    resolve_confirmation,
     tool,
 )
 
@@ -39,6 +38,5 @@ __all__ = [
     "ToolResult",
     "execute",
     "load_all",
-    "resolve_confirmation",
     "tool",
 ]

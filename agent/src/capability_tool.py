@@ -58,19 +58,14 @@ def build_capability_tool(
     @function_tool(
         name="run_capability",
         description=(
-            "Run one high-level capability through Friday's fastest available "
-            "provider. Use this first for multi-step file work, web research, "
-            "reading a URL, coding analysis, or Spotify playback. Available "
-            f"capabilities: {supported}. inputs_json is optional structured JSON. "
-            "Files accepts operation search/list/read, root, path, and query. "
-            "Research accepts query and max_sources. Web accepts url or query. "
-            "Coding accepts root. Music accepts action, query, enabled, mode, "
-            "volume, playlist, and limit. Playlist actions are list_playlists, "
-            "playlist_tracks, open_playlist, and play_playlist. Slow work "
-            "continues in the background."
+            "Run one intelligent or multi-step capability through Friday's "
+            "fastest available provider. Use a registered action instead when "
+            "the request has one clear deterministic operation. Available "
+            f"capabilities: {supported}. Describe the complete desired outcome "
+            "in goal. inputs_json is an optional JSON object containing useful "
+            "structured hints. Slow work continues in the background."
         ),
         flags=llm.ToolFlag.CANCELLABLE,
-        on_duplicate="confirm",
     )
     async def run_capability(
         context: RunContext,

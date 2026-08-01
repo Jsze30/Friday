@@ -17,12 +17,12 @@ served by a localhost-only Python service.
 - Dispatches the `friday-agent` LiveKit worker into that room.
 - Enables the microphone only after local wake detection.
 - Runs a spoken assistant powered by Deepgram STT/TTS, routed OpenAI models, and Silero VAD.
+- Gives the assistant one fast `run_action` tool backed by integration-declared action manifests.
 - Gives the assistant one high-level capability runner backed by ranked providers.
-- Gives common app and audio actions one direct native `control_mac` path.
 - Keeps the reusable primitive kernel behind two fallback discovery tools instead of showing every primitive to the model.
 - Runs slow capabilities in cancellable background tasks so the live voice loop can keep responding.
-- Discovers application controls at runtime through macOS Accessibility instead of requiring a custom Spotify, VS Code, Arc, or Finder integration.
-- Requires explicit confirmation before destructive file changes, processes, AppleScript, or UI interactions execute.
+- Uses macOS Accessibility as a final fallback for unsupported app controls.
+- Executes requested actions immediately without confirmation prompts while keeping path and network safeguards.
 - Supplies a live human-readable Core Location place and a fresh local clock as ambient context.
 - Stores stable profile facts locally and injects them into the agent prompt.
 - Returns to sleep after the agent answers and a short follow-up window expires.
@@ -139,7 +139,8 @@ Current model pipeline in `agent/src/agent.py`:
 
 The agent starts with `BASE_INSTRUCTIONS`, then appends profile facts and a live Core Location snapshot when available.
 It injects the current local time on every LLM turn.
-It exposes `run_capability` directly and places dynamically discovered primitives behind LiveKit's fixed `tool_search` and `call_tool` interface.
+It exposes `run_action` for fast deterministic operations and `run_capability` for intelligent multi-step work.
+It places dynamically discovered primitives behind LiveKit's fixed `tool_search` and `call_tool` interface.
 
 Deployment metadata:
 
@@ -205,7 +206,7 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
    - `capability_call`
    - `tool_call`
 9. LiveKit dispatches the cloud agent into the room.
-10. The agent waits for the Mac participant, fetches profile and location together, fetches the combined primitive manifest, wraps those primitives in a proxy toolset, and starts the session with audio input disabled.
+10. The agent waits for the Mac participant, fetches profile and location together, fetches the action, capability, and primitive manifests, compiles deterministic action routes, wraps primitives in a proxy toolset, and starts the session with audio input disabled.
 11. Swift opens `WS /events` to receive wake/profile events from
     `local_service`.
 
@@ -229,29 +230,50 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
    `activate_turn`.
 6. The agent enables audio input and listens.
 7. Agent state changes are sent back to Swift with `set_assistant_state`.
-8. For broad read-only work, the LLM calls `run_capability`.
-9. The agent starts a local capability task through `capability_call`.
-10. Fast tasks return immediately, while slow tasks release the voice loop and continue in the background.
-11. The agent polls small status messages and cancels local work if the user cancels the LiveKit task.
-12. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
-13. Swift forwards capability and primitive calls to their corresponding localhost APIs.
-14. `local_service` returns structured results with provider traces or primitive confirmation fields.
-15. The agent speaks the result or incorporates the tool result into its answer.
-16. After speaking, the agent enters a 5 second follow-up window.
-17. If no follow-up input arrives, the agent disables audio and calls
+8. For a clear registered command, the local router selects the exact action without another model decision.
+9. The agent emits a `run_action` call directly with the exact catalog-produced arguments, skipping the first model call, and the action runs synchronously through its primitive or fastest available provider.
+10. For intelligent or multi-step work, the LLM calls `run_capability`.
+11. The agent starts a local capability task through `capability_call`.
+12. Fast tasks return immediately, while slow tasks release the voice loop and continue in the background.
+13. The agent polls small status messages and cancels local work if the user cancels the LiveKit task.
+14. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
+15. Swift forwards action, capability, and primitive calls to their corresponding localhost APIs.
+16. `local_service` returns structured results with provider traces or primitive data.
+17. The agent speaks the result or incorporates the tool result into its answer.
+18. After speaking, the agent enters a 5 second follow-up window.
+19. If no follow-up input arrives, the agent disables audio and calls
     `return_to_sleep`.
-18. Swift disables the microphone, resumes local wake processing, and sets the
+20. Swift disables the microphone, resumes local wake processing, and sets the
     app state to `sleeping`.
+
+## Action System
+
+The action layer is the fast path for requests whose execution path is already known.
+The cloud agent exposes one stable `run_action` tool instead of one model-facing tool per integration or operation.
+
+Each integration declares its actions beside its provider adapter.
+An action manifest contains:
+
+- A stable action ID such as `music.pause` or `system.open_app`
+- A description and permission
+- Typed parameters with optional ranges or choices
+- Declarative voice routes with named parameter captures
+- Expected latency and routing priority
+- An execution target, either a capability provider or a primitive
+
+At room startup, Friday merges provider actions with native Mac primitive actions and compiles the routes in memory.
+A clear phrase such as `pause the music` becomes `music.pause` locally, without a separate classification model call.
+The shared executor validates every argument, runs the action synchronously, and preserves provider attempts for debugging and fallback.
+
+Spotify currently declares track, playback, queue, shuffle, repeat, volume, and playlist actions.
+The native Mac layer declares app, browser URL, and Core Audio actions.
+A future Calendar or Slack integration only needs an adapter and action manifests.
+It does not need changes to the central agent router.
 
 ## Capability System
 
 The capability layer is the normal path for multi-step work.
 The model calls one stable tool instead of selecting from every low-level action.
-
-Common Mac system actions use the separate `control_mac` tool because they should complete immediately instead of becoming background tasks.
-It routes directly to native Swift primitives for apps and Core Audio.
-The supported actions are `list_apps`, `open_app`, `open_url`, `quit_app`, `get_volume`, `set_volume`, and `mute_audio`.
-`open_url` opens HTTP or HTTPS addresses through native macOS APIs and defaults to Arc.
 
 Current capabilities:
 
@@ -268,7 +290,7 @@ It verifies every result and automatically falls back to the next provider when 
 Every result includes the selected provider, elapsed time, and all attempts.
 
 Capability tasks are stored in memory for a bounded time.
-The operations are `list`, `start`, `status`, and `cancel`.
+The operations are `list`, `action`, `start`, `status`, and `cancel`.
 Read-only work can run in the background, and LiveKit exposes running-task and cancellation controls automatically.
 
 Additional API, MCP, or specialist-agent providers can use the same contract without adding another model-facing tool.
@@ -279,19 +301,41 @@ For example:
 ```json
 [
   {
-    "id": "browser-agent",
-    "name": "browser specialist",
-    "capabilities": ["browser"],
-    "command": ["/absolute/path/to/browser-agent"],
+    "id": "calendar-agent",
+    "name": "calendar specialist",
+    "capabilities": ["calendar"],
+    "permission": "low_risk_write",
+    "command": ["/absolute/path/to/calendar-agent"],
     "priority": 90,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "actions": [
+      {
+        "id": "calendar.create_event",
+        "capability": "calendar",
+        "operation": "create_event",
+        "description": "Create a calendar event.",
+        "parameters": [
+          {
+            "name": "title",
+            "type": "string",
+            "required": true
+          }
+        ],
+        "routes": [
+          {
+            "pattern": "create\\s+(?P<title>.+?)\\s+on\\s+my\\s+calendar"
+          }
+        ]
+      }
+    ]
   }
 ]
 ```
 
-Configured command providers are trusted local extensions and are currently limited to the read-only capability path.
+Configured command providers are trusted local extensions.
+They can declare read-only or write capabilities and actions in the same configuration, so adding their routes does not require an agent code change.
 The built-in Spotify provider uses a locally enforced `low_risk_write` policy for playback controls.
-Sensitive writes continue through confirmed primitives.
+Requested writes execute immediately through bounded primitives.
 
 ## Primitive System
 
@@ -309,6 +353,7 @@ Each manifest includes:
 - `description`
 - `permission`
 - `parameters`
+- Optional `actions` that make selected primitive operations available through the deterministic action layer
 
 Parameter types must be one of:
 
@@ -328,8 +373,6 @@ Tool result envelope:
   "ok": true,
   "spoken": "The text the agent can speak.",
   "data": {},
-  "needsConfirmation": false,
-  "confirmationId": null,
   "error": null
 }
 ```
@@ -341,25 +384,24 @@ Current primitive kernel:
 | `inspect_path` | `read_only` | Reads an allowed text file or lists Desktop, Documents, Downloads, or the project. |
 | `search_files` | `read_only` | Recursively searches file and folder names below an allowed root. |
 | `create_directory` | `low_risk_write` | Creates a folder inside an allowed root. |
-| `write_file` | `sensitive` | Atomically replaces an allowed text file after confirmation. |
-| `move_path` | `sensitive` | Moves or renames a file or folder after confirmation. |
-| `trash_path` | `sensitive` | Moves an item to the recoverable macOS Trash after confirmation. |
-| `run_process` | `sensitive` | Runs one executable directly without a shell after confirmation. |
-| `run_applescript` | `sensitive` | Controls scriptable Mac apps after confirmation. |
+| `write_file` | `sensitive` | Atomically replaces an allowed text file immediately. |
+| `move_path` | `sensitive` | Moves or renames a file or folder immediately. |
+| `trash_path` | `sensitive` | Moves an item immediately to the recoverable macOS Trash. |
+| `run_process` | `sensitive` | Runs one executable directly without a shell. |
+| `run_applescript` | `sensitive` | Controls scriptable Mac apps immediately. |
 | `web_search` | `read_only` | Searches the public web and returns structured results. |
 | `fetch_url` | `read_only` | Fetches a public HTTP or HTTPS URL while blocking local and private addresses. |
 | `list_apps` | `read_only` | Lists installed or running Mac applications. |
 | `open_app` | `low_risk_write` | Launches or activates any installed Mac application. |
 | `open_url` | `low_risk_write` | Opens an HTTP or HTTPS URL in Arc or another installed browser. |
-| `quit_app` | `sensitive` | Gracefully asks a running application to quit after confirmation. |
+| `quit_app` | `low_risk_write` | Gracefully asks a running application to quit immediately. |
 | `get_volume` | `read_only` | Reads native Core Audio output volume and mute state. |
 | `set_volume` | `low_risk_write` | Sets native Core Audio output volume from 0 to 100. |
 | `mute_audio` | `low_risk_write` | Mutes or unmutes the default Core Audio output device. |
 | `inspect_ui` | `read_only` | Discovers the accessible controls in any running Mac application. |
-| `interact_ui` | `sensitive` | Performs a discovered Accessibility action after confirmation. |
-| `confirm_action` | `low_risk_write` | Approves or rejects one pending sensitive primitive. |
+| `interact_ui` | `low_risk_write` | Performs a discovered Accessibility action immediately. |
 
-Sensitive actions are staged for 60 seconds and do not execute until the user explicitly approves the exact pending action.
+Requested actions execute immediately without a second confirmation turn.
 Tool responses are bounded below LiveKit's RPC payload limit.
 Friday blocks credential paths and server-side requests to local or private network addresses.
 
@@ -634,7 +676,7 @@ The local service logger writes rotating logs with 2 MB files and 3 backups.
 - Do not bind it to a non-loopback interface.
 - LiveKit tokens are short-lived; default TTL is 600 seconds.
 - Local profile data is stored in the user's Application Support directory.
-- Sensitive primitives require a short-lived explicit confirmation before execution.
+- Requested primitives execute immediately without confirmation prompts.
 - File access is restricted to the project and ordinary Desktop, Documents, and Downloads roots by default.
 - Public HTTP reads block local, private, link-local, and reserved network addresses.
 
@@ -704,6 +746,7 @@ Expected shape:
 ## Current Limitations
 
 - Tool manifests are loaded once per session.
+- Action and capability catalogs are loaded once per session.
 - The Swift app path to `local_service` is hard-coded.
 - `local_service` has no local auth because it is intended to be loopback-only.
 - Wake-word quality depends on the configured openWakeWord model and local microphone conditions.
@@ -713,8 +756,10 @@ Expected shape:
 
 ## Development Notes
 
-- Prefer adding local capabilities as `local_service` tools instead of giving
-  the cloud agent direct network access to the Mac.
+- Add a provider adapter and declarative action manifests for a new integration.
+- Add a capability only when the work requires reasoning or several steps.
+- Add a primitive only when Friday needs a genuinely new low-level power.
+- Keep direct network access to the Mac behind the existing Swift RPC boundary.
 - Keep tool descriptions precise. The LLM sees those descriptions and uses them
   to decide when to call the tool.
 - Keep `ToolResult.spoken` concise because it is usually spoken aloud.

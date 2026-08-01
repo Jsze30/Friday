@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .base import CapabilityRequest
+from .base import CapabilityRequest, ProviderFailed
 from .broker import AllProvidersFailed, CapabilityBroker
 
 log = logging.getLogger("friday.capabilities.runtime")
@@ -66,9 +66,7 @@ class CapabilityTask:
             "status": self.status,
             "provider": self.provider,
             "events": [
-                event.to_dict()
-                for event in self.events
-                if event.sequence > since
+                event.to_dict() for event in self.events if event.sequence > since
             ],
             "lastSequence": self.events[-1].sequence if self.events else 0,
             "result": self.result,
@@ -120,6 +118,42 @@ class CapabilityRuntime:
         )
         return record.snapshot()
 
+    async def action(
+        self,
+        action_id: str,
+        goal: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        action_id = action_id.strip().casefold()
+        if not action_id:
+            return {"ok": False, "error": "action is required"}
+
+        async def progress(_phase: str, _message: str) -> None:
+            return None
+
+        try:
+            result, attempts, provider = await self._broker.execute_action(
+                action_id,
+                arguments or {},
+                goal,
+                progress,
+            )
+        except AllProvidersFailed as error:
+            return {
+                "ok": False,
+                "error": str(error),
+                "attempts": [attempt.to_dict() for attempt in error.attempts],
+            }
+        except ProviderFailed as error:
+            return {"ok": False, "error": str(error)}
+        return {
+            "ok": True,
+            "status": "succeeded",
+            "provider": provider,
+            "result": result.to_dict(),
+            "attempts": [attempt.to_dict() for attempt in attempts],
+        }
+
     async def status(self, task_id: str, since: int = 0) -> dict[str, Any]:
         record = self._tasks.get(task_id)
         if record is None:
@@ -157,11 +191,7 @@ class CapabilityRuntime:
         async def progress(phase: str, message: str) -> None:
             record.events.append(
                 TaskEvent(
-                    sequence=(
-                        record.events[-1].sequence + 1
-                        if record.events
-                        else 1
-                    ),
+                    sequence=(record.events[-1].sequence + 1 if record.events else 1),
                     phase=phase,
                     message=message[:500],
                     timestamp=time.time(),
@@ -187,9 +217,7 @@ class CapabilityRuntime:
         except AllProvidersFailed as error:
             record.status = "failed"
             record.error = str(error)[:2_000]
-            record.attempts = [
-                attempt.to_dict() for attempt in error.attempts
-            ]
+            record.attempts = [attempt.to_dict() for attempt in error.attempts]
             await progress("failed", "Capability task failed.")
             log.warning(
                 "capability failed task=%s capability=%s error=%s",

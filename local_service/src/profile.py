@@ -14,7 +14,9 @@ from .events import bus
 
 log = logging.getLogger("friday.profile")
 
-PROFILE_PATH = Path.home() / "Library" / "Application Support" / "Friday" / "profile.json"
+PROFILE_PATH = (
+    Path.home() / "Library" / "Application Support" / "Friday" / "profile.json"
+)
 SEED_PATH = REPO_ROOT / "profile.seed.json"
 
 _lock = threading.Lock()
@@ -28,7 +30,9 @@ def _ensure_exists() -> None:
         shutil.copyfile(SEED_PATH, PROFILE_PATH)
         log.info("seeded profile from %s", SEED_PATH)
     else:
-        PROFILE_PATH.write_text(json.dumps({"version": 1, "facts": {}, "updated_at": None}))
+        PROFILE_PATH.write_text(
+            json.dumps({"version": 1, "facts": {}, "updated_at": None})
+        )
         log.info("created empty profile at %s", PROFILE_PATH)
 
 

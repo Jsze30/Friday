@@ -4,6 +4,7 @@ import asyncio
 import socket
 import unittest
 import urllib.parse
+from unittest.mock import MagicMock, patch
 
 from src.capabilities.base import CapabilityRequest
 from src.capabilities.spotify import (
@@ -140,6 +141,52 @@ def unused_port() -> int:
 
 
 class SpotifyTests(unittest.IsolatedAsyncioTestCase):
+    def test_declares_fast_actions_for_every_supported_operation(self) -> None:
+        action_ids = {action.action_id for action in SpotifyProvider.info.actions}
+
+        self.assertEqual(
+            action_ids,
+            {
+                "music.connect",
+                "music.pause",
+                "music.resume",
+                "music.next",
+                "music.previous",
+                "music.status",
+                "music.list_playlists",
+                "music.playlist_tracks",
+                "music.open_playlist",
+                "music.play_playlist",
+                "music.queue",
+                "music.shuffle",
+                "music.repeat",
+                "music.volume",
+                "music.play",
+            },
+        )
+
+    async def test_whitespace_only_api_response_is_empty(self) -> None:
+        client = SpotifyClient(
+            "client-id",
+            "http://127.0.0.1:43821/spotify/callback",
+            token_store=MemoryTokenStore(),  # type: ignore[arg-type]
+        )
+        response = MagicMock()
+        response.read.return_value = b" \n"
+        response_context = MagicMock()
+        response_context.__enter__.return_value = response
+
+        with patch(
+            "src.capabilities.spotify.urllib.request.urlopen",
+            return_value=response_context,
+        ):
+            value = await client._request_json(
+                "PUT",
+                "https://api.spotify.com/v1/me/player/play",
+            )
+
+        self.assertIsNone(value)
+
     async def test_pkce_authorization_contains_no_client_secret(self) -> None:
         opened: list[str] = []
         port = unused_port()

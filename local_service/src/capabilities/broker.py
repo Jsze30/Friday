@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .base import (
+    ActionDefinition,
     CapabilityProvider,
     CapabilityRequest,
     CapabilityResult,
@@ -47,9 +48,7 @@ class AllProvidersFailed(ProviderFailed):
             f"{attempt.provider_id}: {attempt.reason or attempt.status}"
             for attempt in attempts
         )
-        super().__init__(
-            f"Every provider for {capability} failed. {reasons}"
-        )
+        super().__init__(f"Every provider for {capability} failed. {reasons}")
 
 
 class CapabilityBroker:
@@ -81,7 +80,38 @@ class CapabilityBroker:
                 for capability in provider.info.capabilities
             }
         )
-        return {"capabilities": capabilities, "providers": provider_rows}
+        actions: dict[str, dict[str, Any]] = {}
+        ranked_available = sorted(
+            (
+                provider
+                for provider, is_available in zip(
+                    self._providers,
+                    available,
+                    strict=True,
+                )
+                if is_available
+            ),
+            key=self._provider_rank,
+        )
+        for provider in ranked_available:
+            for action in provider.info.actions:
+                existing = actions.get(action.action_id)
+                if existing is None:
+                    existing = {
+                        **action.to_dict(),
+                        "target": {
+                            "kind": "capability",
+                            "action": action.action_id,
+                        },
+                        "providers": [],
+                    }
+                    actions[action.action_id] = existing
+                existing["providers"].append(provider.info.provider_id)
+        return {
+            "capabilities": capabilities,
+            "actions": list(actions.values()),
+            "providers": provider_rows,
+        }
 
     async def execute(
         self,
@@ -93,7 +123,49 @@ class CapabilityBroker:
             raise ProviderUnavailable(
                 f"No available provider supports {request.capability}."
             )
+        return await self._execute_candidates(request, candidates, progress)
 
+    async def execute_action(
+        self,
+        action_id: str,
+        arguments: dict[str, Any],
+        goal: str,
+        progress: ProgressCallback,
+    ) -> tuple[CapabilityResult, list[ProviderAttempt], str]:
+        matches: list[tuple[CapabilityProvider, ActionDefinition]] = [
+            (provider, action)
+            for provider in self._providers
+            for action in provider.info.actions
+            if action.action_id == action_id
+        ]
+        availability = await asyncio.gather(
+            *(self._is_available(provider) for provider, _action in matches)
+        )
+        available_matches = [
+            match
+            for match, is_available in zip(matches, availability, strict=True)
+            if is_available
+        ]
+        if not available_matches:
+            raise ProviderUnavailable(f"No available provider supports {action_id}.")
+        available_matches.sort(key=lambda match: self._provider_rank(match[0]))
+        action = available_matches[0][1]
+        normalized_arguments = self._validate_action_arguments(action, arguments)
+        request = CapabilityRequest(
+            capability=action.capability,
+            goal=goal.strip() or action.description,
+            inputs={"action": action.operation, **normalized_arguments},
+            permission=action.permission,
+        )
+        candidates = [provider for provider, _action in available_matches]
+        return await self._execute_candidates(request, candidates, progress)
+
+    async def _execute_candidates(
+        self,
+        request: CapabilityRequest,
+        candidates: list[CapabilityProvider],
+        progress: ProgressCallback,
+    ) -> tuple[CapabilityResult, list[ProviderAttempt], str]:
         attempts: list[ProviderAttempt] = []
         for index, provider in enumerate(candidates):
             if index:
@@ -194,13 +266,67 @@ class CapabilityBroker:
         ]
         return sorted(
             candidates,
-            key=lambda provider: (
-                -provider.info.priority,
-                -provider.info.reliability,
-                provider.info.latency,
-                provider.info.provider_id,
-            ),
+            key=self._provider_rank,
         )
+
+    @staticmethod
+    def _provider_rank(provider: CapabilityProvider) -> tuple[float | int | str, ...]:
+        return (
+            -provider.info.priority,
+            -provider.info.reliability,
+            provider.info.latency,
+            provider.info.provider_id,
+        )
+
+    @staticmethod
+    def _validate_action_arguments(
+        action: ActionDefinition,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            raise ProviderFailed("action arguments must be an object")
+        parameters = {parameter.name: parameter for parameter in action.parameters}
+        unknown = sorted(set(arguments) - set(parameters))
+        if unknown:
+            raise ProviderFailed(
+                f"Unknown arguments for {action.action_id}: {', '.join(unknown)}."
+            )
+        normalized: dict[str, Any] = {}
+        for name, parameter in parameters.items():
+            if name not in arguments:
+                if parameter.required:
+                    raise ProviderFailed(f"{name} is required for {action.action_id}.")
+                continue
+            value = arguments[name]
+            valid = {
+                "string": isinstance(value, str),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "number": isinstance(value, (int, float))
+                and not isinstance(value, bool),
+                "boolean": isinstance(value, bool),
+            }[parameter.type]
+            if not valid:
+                raise ProviderFailed(
+                    f"{name} must be a {parameter.type} for {action.action_id}."
+                )
+            if (
+                parameter.minimum is not None
+                and isinstance(value, (int, float))
+                and value < parameter.minimum
+            ):
+                raise ProviderFailed(f"{name} must be at least {parameter.minimum:g}.")
+            if (
+                parameter.maximum is not None
+                and isinstance(value, (int, float))
+                and value > parameter.maximum
+            ):
+                raise ProviderFailed(f"{name} must be at most {parameter.maximum:g}.")
+            if parameter.choices and str(value) not in parameter.choices:
+                raise ProviderFailed(
+                    f"{name} must be one of {', '.join(parameter.choices)}."
+                )
+            normalized[name] = value
+        return normalized
 
     async def _is_available(self, provider: CapabilityProvider) -> bool:
         now = time.monotonic()

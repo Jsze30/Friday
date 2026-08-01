@@ -217,13 +217,6 @@ final class LiveKitController: NSObject, RoomDelegate {
             return await MacPrimitiveProvider.shared.execute(jsonPayload: jsonPayload)
         }
 
-        if tool == "confirm_action",
-           let arguments = payload["arguments"] as? [String: Any],
-           let confirmationID = arguments["confirmation_id"] as? String,
-           confirmationID.hasPrefix("mac:") {
-            return await MacPrimitiveProvider.shared.confirm(jsonPayload: jsonPayload)
-        }
-
         do {
             return try await LocalServiceClient(port: servicePort)
                 .executeTool(jsonPayload: jsonPayload)
@@ -269,8 +262,6 @@ final class LiveKitController: NSObject, RoomDelegate {
             "ok": false,
             "spoken": NSNull(),
             "data": NSNull(),
-            "needsConfirmation": false,
-            "confirmationId": NSNull(),
             "error": message,
         ])
     }

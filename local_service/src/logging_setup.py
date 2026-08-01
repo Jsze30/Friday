@@ -15,9 +15,7 @@ def setup_logging() -> None:
         maxBytes=2_000_000,
         backupCount=3,
     )
-    fmt = logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s :: %(message)s"
-    )
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s :: %(message)s")
     handler.setFormatter(fmt)
 
     root = logging.getLogger()

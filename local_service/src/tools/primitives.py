@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from .base import ToolParam, ToolResult, resolve_confirmation, tool
+from .base import ToolParam, ToolResult, tool
 
 MAX_FILE_CHARS = 10_000
 MAX_HTTP_CHARS = 10_000
@@ -382,8 +382,8 @@ async def create_directory(path: str) -> ToolResult:
 @tool(
     name="write_file",
     description=(
-        "Create or replace a UTF-8 text file. This is sensitive and always "
-        "requires explicit confirmation before any content is written."
+        "Create or replace a UTF-8 text file immediately inside Friday's "
+        "allowed directories."
     ),
     parameters=[
         ToolParam(
@@ -443,12 +443,16 @@ async def write_file(path: str, content: str) -> ToolResult:
 @tool(
     name="move_path",
     description=(
-        "Move or rename a file or folder within Friday's allowed directories. "
-        "This is sensitive and always requires explicit confirmation."
+        "Move or rename a file or folder immediately within Friday's allowed "
+        "directories."
     ),
     parameters=[
-        ToolParam(name="source", type="string", description="Existing file or folder path."),
-        ToolParam(name="destination", type="string", description="New file or folder path."),
+        ToolParam(
+            name="source", type="string", description="Existing file or folder path."
+        ),
+        ToolParam(
+            name="destination", type="string", description="New file or folder path."
+        ),
     ],
     permission="sensitive",
 )
@@ -476,7 +480,9 @@ async def move_path(source: str, destination: str) -> ToolResult:
             data={"error": "destination_exists", "path": str(resolved_destination)},
         )
     try:
-        await asyncio.to_thread(resolved_destination.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            resolved_destination.parent.mkdir, parents=True, exist_ok=True
+        )
         await asyncio.to_thread(shutil.move, resolved_source, resolved_destination)
     except OSError as error:
         return ToolResult(
@@ -495,11 +501,12 @@ async def move_path(source: str, destination: str) -> ToolResult:
 @tool(
     name="trash_path",
     description=(
-        "Move a file or folder to the user's Trash so it can be recovered. "
-        "This is sensitive and always requires explicit confirmation."
+        "Move a file or folder immediately to the user's Trash so it can be recovered."
     ),
     parameters=[
-        ToolParam(name="path", type="string", description="Existing file or folder path.")
+        ToolParam(
+            name="path", type="string", description="Existing file or folder path."
+        )
     ],
     permission="sensitive",
 )
@@ -551,7 +558,7 @@ async def trash_path(path: str) -> ToolResult:
     name="run_process",
     description=(
         "Run one executable directly without a shell. Use for app CLIs and "
-        "system commands. This is sensitive and always requires confirmation."
+        "system commands. Execute immediately when requested."
     ),
     parameters=[
         ToolParam(
@@ -585,7 +592,9 @@ async def run_process(
             spoken="Every process argument must be text.",
             data={"error": "bad_arguments"},
         )
-    resolved = executable if Path(executable).is_absolute() else shutil.which(executable)
+    resolved = (
+        executable if Path(executable).is_absolute() else shutil.which(executable)
+    )
     if not resolved:
         return ToolResult(
             spoken=f"I could not find {executable}.",
@@ -638,7 +647,7 @@ async def run_process(
     description=(
         "Run AppleScript for apps that publish an AppleScript interface. "
         "Prefer inspect_ui and interact_ui when no known script is available. "
-        "This is sensitive and always requires confirmation."
+        "Execute immediately when requested."
     ),
     parameters=[
         ToolParam(
@@ -710,7 +719,9 @@ def _validate_public_url(url: str) -> None:
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0])
         if not ip.is_global:
-            raise ValueError("private, local, and reserved network addresses are blocked")
+            raise ValueError(
+                "private, local, and reserved network addresses are blocked"
+            )
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -771,7 +782,9 @@ def _web_search(query: str, limit: int) -> list[dict[str, str]]:
         "information and no exact URL is already known."
     ),
     parameters=[
-        ToolParam(name="query", type="string", description="Natural-language search query."),
+        ToolParam(
+            name="query", type="string", description="Natural-language search query."
+        ),
         ToolParam(
             name="max_results",
             type="integer",
@@ -849,27 +862,3 @@ async def fetch_url(url: str, max_chars: int | None = None) -> ToolResult:
             "truncated": truncated,
         },
     )
-
-
-@tool(
-    name="confirm_action",
-    description=(
-        "Approve or reject one pending sensitive action. Call only after the "
-        "user explicitly responds to Friday's confirmation question."
-    ),
-    parameters=[
-        ToolParam(
-            name="confirmation_id",
-            type="string",
-            description="The exact pending confirmation identifier.",
-        ),
-        ToolParam(
-            name="approve",
-            type="boolean",
-            description="True only when the user explicitly approved the action.",
-        ),
-    ],
-    permission="low_risk_write",
-)
-async def confirm_action(confirmation_id: str, approve: bool) -> ToolResult:
-    return await resolve_confirmation(confirmation_id, approve)

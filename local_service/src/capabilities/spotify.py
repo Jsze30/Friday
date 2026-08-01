@@ -18,6 +18,9 @@ from typing import Any
 import keyring
 
 from .base import (
+    ActionDefinition,
+    ActionParameter,
+    ActionRoute,
     CapabilityProvider,
     CapabilityRequest,
     CapabilityResult,
@@ -141,9 +144,13 @@ class SpotifyClient:
                     )
                 self._authorization_state = secrets.token_urlsafe(24)
                 self._code_verifier = secrets.token_urlsafe(64)
-                challenge = base64.urlsafe_b64encode(
-                    hashlib.sha256(self._code_verifier.encode()).digest()
-                ).rstrip(b"=").decode()
+                challenge = (
+                    base64.urlsafe_b64encode(
+                        hashlib.sha256(self._code_verifier.encode()).digest()
+                    )
+                    .rstrip(b"=")
+                    .decode()
+                )
                 try:
                     self._callback_server = await asyncio.start_server(
                         self._handle_callback,
@@ -165,9 +172,7 @@ class SpotifyClient:
                         "state": self._authorization_state,
                     }
                 )
-                authorization_url = (
-                    f"{SPOTIFY_ACCOUNTS_BASE}/authorize?{parameters}"
-                )
+                authorization_url = f"{SPOTIFY_ACCOUNTS_BASE}/authorize?{parameters}"
                 self._authorization_url = authorization_url
                 self._authorization_timeout = asyncio.create_task(
                     self._expire_authorization(),
@@ -285,9 +290,7 @@ class SpotifyClient:
             query={"q": query, "type": "track", "limit": "5"},
         )
         tracks = (
-            value.get("tracks", {}).get("items", [])
-            if isinstance(value, dict)
-            else []
+            value.get("tracks", {}).get("items", []) if isinstance(value, dict) else []
         )
         track = next(
             (item for item in tracks if isinstance(item, dict)),
@@ -305,9 +308,7 @@ class SpotifyClient:
             "artists": artists,
             "artist": ", ".join(artists),
             "uri": str(track.get("uri") or ""),
-            "url": str(
-                (track.get("external_urls") or {}).get("spotify") or ""
-            ),
+            "url": str((track.get("external_urls") or {}).get("spotify") or ""),
         }
 
     async def list_playlists(
@@ -365,7 +366,11 @@ class SpotifyClient:
                     "uri": str(item.get("uri") or ""),
                 }
             )
-        total = int(value.get("total") or len(items)) if isinstance(value, dict) else len(items)
+        total = (
+            int(value.get("total") or len(items))
+            if isinstance(value, dict)
+            else len(items)
+        )
         return {
             "playlist": playlist,
             "items": items,
@@ -473,8 +478,7 @@ class SpotifyClient:
                         "name": str(item.get("name") or "Untitled playlist"),
                         "uri": str(item.get("uri") or ""),
                         "url": str(
-                            (item.get("external_urls") or {}).get("spotify")
-                            or ""
+                            (item.get("external_urls") or {}).get("spotify") or ""
                         ),
                         "owner": str(owner.get("display_name") or ""),
                         "public": item.get("public"),
@@ -526,11 +530,7 @@ class SpotifyClient:
         value = await self._api_request("GET", "/me/player/devices")
         if not isinstance(value, dict):
             return []
-        return [
-            item
-            for item in value.get("devices", [])
-            if isinstance(item, dict)
-        ]
+        return [item for item in value.get("devices", []) if isinstance(item, dict)]
 
     async def _launch_spotify(self) -> None:
         await self._open_spotify_uri()
@@ -659,18 +659,16 @@ class SpotifyClient:
                     await self._save_token(token)
                     status = "200 OK"
                     title = "Spotify connected"
-                    message = (
-                        "Spotify is connected to Friday. You can close this tab."
-                    )
+                    message = "Spotify is connected to Friday. You can close this tab."
         except Exception:  # noqa: BLE001
             message = "Friday could not complete the Spotify connection."
 
         html = (
-            "<!doctype html><html><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width\">"
+            '<!doctype html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width">'
             f"<title>{title}</title></head>"
-            "<body style=\"font-family:-apple-system;padding:48px;"
-            "max-width:560px;margin:auto\">"
+            '<body style="font-family:-apple-system;padding:48px;'
+            'max-width:560px;margin:auto">'
             f"<h1>{title}</h1><p>{message}</p></body></html>"
         ).encode()
         response = (
@@ -723,8 +721,8 @@ class SpotifyClient:
 
     async def _save_token(self, token: dict[str, Any]) -> None:
         stored = dict(token)
-        stored["expires_at"] = (
-            time.time() + max(0, int(token.get("expires_in") or 3600))
+        stored["expires_at"] = time.time() + max(
+            0, int(token.get("expires_in") or 3600)
         )
         await self._token_store.save(stored)
 
@@ -772,7 +770,9 @@ class SpotifyClient:
                 raise SpotifyHTTPError(error.code, message) from error
             except urllib.error.URLError as error:
                 raise ProviderFailed("Could not reach Spotify.") from error
-            if not payload:
+            # Spotify playback endpoints normally return an empty 204 body,
+            # but some HTTP paths can preserve harmless response whitespace.
+            if not payload.strip():
                 return None
             try:
                 return json.loads(payload)
@@ -780,6 +780,289 @@ class SpotifyClient:
                 raise ProviderFailed("Spotify returned invalid data.") from error
 
         return await asyncio.to_thread(request)
+
+
+SPOTIFY_ACTIONS = (
+    ActionDefinition(
+        action_id="music.connect",
+        capability="music",
+        operation="connect",
+        description="Connect or reconnect the user's Spotify account.",
+        routes=(
+            ActionRoute(r"(?:connect|reconnect|authorize|log\s+in(?:to)?)\s+spotify"),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.pause",
+        capability="music",
+        operation="pause",
+        description="Pause Spotify playback.",
+        routes=(
+            ActionRoute(
+                r"(?:pause)(?:\s+(?:the\s+|my\s+)?"
+                r"(?:music|song|track|spotify|playback))?"
+                r"(?:\s+(?:on|in)\s+spotify)?"
+            ),
+            ActionRoute(
+                r"stop\s+(?:the\s+|my\s+)?"
+                r"(?:music|song|track|spotify|playback)"
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.resume",
+        capability="music",
+        operation="play",
+        description="Resume the current Spotify playback.",
+        routes=(
+            ActionRoute(
+                r"(?:resume|continue)(?:\s+(?:the\s+|my\s+)?"
+                r"(?:music|song|track|spotify|playback))?"
+                r"(?:\s+(?:on|in)\s+spotify)?"
+            ),
+            ActionRoute(
+                r"play(?:\s+(?:it|music|my\s+music|the\s+music|spotify|"
+                r"this\s+(?:song|track)|that\s+(?:song|track)))?"
+                r"(?:\s+(?:on|in)\s+spotify)?"
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=140,
+    ),
+    ActionDefinition(
+        action_id="music.next",
+        capability="music",
+        operation="next",
+        description="Skip to the next Spotify track.",
+        routes=(ActionRoute(r"(?:skip|next)(?:\s+(?:song|track))?"),),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.previous",
+        capability="music",
+        operation="previous",
+        description="Return to the previous Spotify track.",
+        routes=(ActionRoute(r"(?:previous|back|go\s+back)(?:\s+(?:song|track))?"),),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.status",
+        capability="music",
+        operation="status",
+        description="Read the current Spotify playback status.",
+        routes=(
+            ActionRoute(
+                r"(?:what(?:'s|\s+is)\s+(?:currently\s+)?playing|"
+                r"what\s+(?:song|track)\s+is\s+(?:this|playing)|"
+                r"spotify\s+status)"
+            ),
+        ),
+        permission="read_only",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.list_playlists",
+        capability="music",
+        operation="list_playlists",
+        description="List the user's Spotify playlists.",
+        routes=(
+            ActionRoute(
+                r"(?:open|show|list|browse)\s+(?:me\s+)?"
+                r"(?:my\s+|the\s+)?(?:spotify\s+)?playlists?"
+            ),
+        ),
+        permission="read_only",
+        latency_ms=700,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.playlist_tracks",
+        capability="music",
+        operation="playlist_tracks",
+        description="List the tracks in a named Spotify playlist.",
+        parameters=(
+            ActionParameter(
+                "playlist",
+                "string",
+                "The spoken playlist name.",
+            ),
+        ),
+        routes=(
+            ActionRoute(
+                r"(?:(?:what|which)\s+(?:songs|tracks)\s+(?:are\s+)?"
+                r"(?:in|on)|(?:show|list)\s+(?:me\s+)?(?:the\s+)?"
+                r"(?:songs|tracks)\s+(?:in|on)|look\s+(?:through|in))\s+"
+                r"(?:my\s+|the\s+)?(?P<playlist>.+?)\s+playlist"
+            ),
+        ),
+        permission="read_only",
+        latency_ms=900,
+        priority=150,
+    ),
+    ActionDefinition(
+        action_id="music.open_playlist",
+        capability="music",
+        operation="open_playlist",
+        description="Open a named playlist in the Spotify app.",
+        parameters=(
+            ActionParameter(
+                "playlist",
+                "string",
+                "The spoken playlist name.",
+            ),
+        ),
+        routes=(
+            ActionRoute(r"open\s+(?:my\s+|the\s+)?(?P<playlist>.+?)\s+playlist"),
+            ActionRoute(r"open\s+(?:my\s+|the\s+)?playlist\s+(?P<playlist>.+)"),
+        ),
+        permission="low_risk_write",
+        latency_ms=900,
+        priority=150,
+    ),
+    ActionDefinition(
+        action_id="music.play_playlist",
+        capability="music",
+        operation="play_playlist",
+        description="Start playing a named Spotify playlist.",
+        parameters=(
+            ActionParameter(
+                "playlist",
+                "string",
+                "The spoken playlist name.",
+            ),
+        ),
+        routes=(
+            ActionRoute(r"play\s+(?:my\s+|the\s+)?(?P<playlist>.+?)\s+playlist"),
+            ActionRoute(r"play\s+(?:my\s+|the\s+)?playlist\s+(?P<playlist>.+)"),
+        ),
+        permission="low_risk_write",
+        latency_ms=900,
+        priority=150,
+    ),
+    ActionDefinition(
+        action_id="music.queue",
+        capability="music",
+        operation="queue",
+        description="Add a named song to the Spotify queue.",
+        parameters=(
+            ActionParameter("query", "string", "The song and optional artist."),
+        ),
+        routes=(
+            ActionRoute(
+                r"(?:queue|add)\s+(?P<query>.+?)"
+                r"(?:\s+to\s+(?:the\s+)?queue)?"
+                r"(?:\s+on\s+spotify)?"
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=900,
+        priority=120,
+    ),
+    ActionDefinition(
+        action_id="music.shuffle",
+        capability="music",
+        operation="shuffle",
+        description="Turn Spotify shuffle on or off.",
+        parameters=(
+            ActionParameter("enabled", "boolean", "Whether shuffle is enabled."),
+        ),
+        routes=(
+            ActionRoute(
+                r"(?:turn\s+)?shuffle\s+on",
+                {"enabled": True},
+            ),
+            ActionRoute(
+                r"(?:turn\s+)?shuffle\s+off",
+                {"enabled": False},
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.repeat",
+        capability="music",
+        operation="repeat",
+        description="Set the Spotify repeat mode.",
+        parameters=(
+            ActionParameter(
+                "mode",
+                "string",
+                "Spotify repeat mode.",
+                choices=("off", "track", "context"),
+            ),
+        ),
+        routes=(
+            ActionRoute(r"(?:set\s+)?repeat\s+off", {"mode": "off"}),
+            ActionRoute(
+                r"(?:set\s+)?repeat\s+(?:track|song)",
+                {"mode": "track"},
+            ),
+            ActionRoute(
+                r"(?:set\s+)?repeat\s+(?:context|playlist)",
+                {"mode": "context"},
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.volume",
+        capability="music",
+        operation="volume",
+        description="Set Spotify's playback volume.",
+        parameters=(
+            ActionParameter(
+                "volume",
+                "integer",
+                "Exact Spotify volume from 0 to 100.",
+                minimum=0,
+                maximum=100,
+            ),
+        ),
+        routes=(
+            ActionRoute(
+                r"(?:set\s+)?spotify\s+volume\s+(?:to\s+)?"
+                r"(?P<volume>\d{1,3})(?:\s*%)?"
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=500,
+        priority=130,
+    ),
+    ActionDefinition(
+        action_id="music.play",
+        capability="music",
+        operation="play",
+        description="Find and play a named Spotify song.",
+        parameters=(
+            ActionParameter("query", "string", "The song and optional artist."),
+        ),
+        routes=(
+            ActionRoute(
+                r"play(?:\s+(?:the\s+)?song)?\s+(?P<query>.+?)"
+                r"(?:\s+on\s+spotify)?"
+            ),
+        ),
+        permission="low_risk_write",
+        latency_ms=900,
+        priority=100,
+    ),
+)
 
 
 class SpotifyProvider(CapabilityProvider):
@@ -790,6 +1073,7 @@ class SpotifyProvider(CapabilityProvider):
             "Controls Spotify playback and finds exact tracks through Spotify's API."
         ),
         capabilities=("music",),
+        actions=SPOTIFY_ACTIONS,
         permission="low_risk_write",
         priority=100,
         reliability=0.95,
@@ -831,9 +1115,7 @@ class SpotifyProvider(CapabilityProvider):
                 return _playback_result(await self.client.playback())
             if action == "list_playlists":
                 query = str(
-                    request.inputs.get("playlist")
-                    or request.inputs.get("query")
-                    or ""
+                    request.inputs.get("playlist") or request.inputs.get("query") or ""
                 ).strip()
                 playlists = await self.client.list_playlists(
                     query=query or None,
@@ -861,8 +1143,7 @@ class SpotifyProvider(CapabilityProvider):
                 playlist = contents["playlist"]
                 return CapabilityResult(
                     summary=(
-                        f"Found {len(contents['items'])} items in "
-                        f"{playlist['name']}."
+                        f"Found {len(contents['items'])} items in {playlist['name']}."
                     ),
                     data={"action": action, **contents},
                 )
@@ -889,9 +1170,7 @@ class SpotifyProvider(CapabilityProvider):
                 track = await self.client.play(query or None)
                 if track:
                     return CapabilityResult(
-                        summary=(
-                            f"Playing {track['name']} by {track['artist']}."
-                        ),
+                        summary=(f"Playing {track['name']} by {track['artist']}."),
                         data={"action": action, "track": track},
                     )
                 return CapabilityResult(
@@ -1049,9 +1328,7 @@ def _music_action(request: CapabilityRequest) -> str:
 
 def _music_query(request: CapabilityRequest) -> str:
     supplied = str(
-        request.inputs.get("query")
-        or request.inputs.get("track")
-        or ""
+        request.inputs.get("query") or request.inputs.get("track") or ""
     ).strip()
     artist = str(request.inputs.get("artist") or "").strip()
     if supplied:
@@ -1076,9 +1353,7 @@ def _music_query(request: CapabilityRequest) -> str:
 
 def _playlist_query(request: CapabilityRequest) -> str:
     supplied = str(
-        request.inputs.get("playlist")
-        or request.inputs.get("query")
-        or ""
+        request.inputs.get("playlist") or request.inputs.get("query") or ""
     ).strip()
     if supplied:
         return supplied
@@ -1119,11 +1394,7 @@ def _normalized_name(value: str) -> str:
 
 
 def _has_required_scopes(token: dict[str, Any]) -> bool:
-    granted = {
-        scope
-        for scope in str(token.get("scope") or "").split()
-        if scope
-    }
+    granted = {scope for scope in str(token.get("scope") or "").split() if scope}
     return set(SPOTIFY_SCOPES).issubset(granted)
 
 

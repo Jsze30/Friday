@@ -54,6 +54,15 @@ async def execute(payload: dict[str, Any]) -> dict[str, Any]:
             str(payload.get("goal") or ""),
             inputs,
         )
+    if operation == "action":
+        arguments = payload.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return {"ok": False, "error": "arguments must be an object"}
+        return await runtime.action(
+            str(payload.get("action") or ""),
+            str(payload.get("goal") or ""),
+            arguments,
+        )
     if operation == "status":
         return await runtime.status(
             str(payload.get("taskId") or ""),
