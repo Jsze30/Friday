@@ -9,8 +9,8 @@ log = logging.getLogger("friday-agent.actions")
 
 _MULTI_ACTION_PATTERN = re.compile(
     r"\b(?:and|then|after\s+that|followed\s+by)\s+"
-    r"(?:open|close|quit|play|pause|search|find|analy[sz]e|"
-    r"debug|explain|write|move|delete|run)\b",
+    r"(?:open|close|quit|play|pause|press|click|select|choose|type|scroll|"
+    r"search|find|analy[sz]e|debug|explain|write|move|delete|run)\b",
     re.IGNORECASE,
 )
 

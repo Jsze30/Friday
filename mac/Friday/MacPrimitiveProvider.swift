@@ -26,6 +26,7 @@ final class MacPrimitiveProvider {
 
     private let maximumRPCBytes = 14_000
     private var elementCache: [String: AXUIElement] = [:]
+    private var elementSnapshotID = ""
 
     private init() {}
 
@@ -39,7 +40,11 @@ final class MacPrimitiveProvider {
         "set_volume",
         "mute_audio",
         "inspect_ui",
+        "observe_screen",
         "interact_ui",
+        "input_control",
+        "locate_ui",
+        "verify_ui",
     ]
 
     var manifests: [[String: Any]] {
@@ -339,7 +344,7 @@ final class MacPrimitiveProvider {
                     [
                         "name": "max_elements",
                         "type": "integer",
-                        "description": "Maximum controls to return from 1 to 60. Defaults to 40.",
+                        "description": "Maximum useful elements to return from 1 to 80. Defaults to 50.",
                         "required": false,
                     ],
                 ],
@@ -370,6 +375,115 @@ final class MacPrimitiveProvider {
                         "type": "string",
                         "description": "Text used by set_value or type_text.",
                         "required": false,
+                    ],
+                ],
+            ],
+            [
+                "name": "observe_screen",
+                "description": """
+                Capture a lightweight state snapshot of the active window. Returns \
+                the active application, window, OCR text, and visual fingerprint so \
+                computer actions can verify that the visible state changed.
+                """,
+                "permission": "read_only",
+                "parameters": [],
+            ],
+            [
+                "name": "input_control",
+                "description": """
+                Send one generic mouse, keyboard, text, or scroll input to the Mac. \
+                Prefer Accessibility element actions and use coordinate clicks only \
+                when structured controls are unavailable.
+                """,
+                "permission": "low_risk_write",
+                "parameters": [
+                    [
+                        "name": "operation",
+                        "type": "string",
+                        "description": "click, double_click, key, text, or scroll.",
+                        "required": true,
+                    ],
+                    [
+                        "name": "x",
+                        "type": "number",
+                        "description": "Global screen x coordinate for a click.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "y",
+                        "type": "number",
+                        "description": "Global screen y coordinate for a click.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "key",
+                        "type": "string",
+                        "description": "Key name for a key operation.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "modifiers",
+                        "type": "array",
+                        "description": "Optional command, option, control, or shift modifiers.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "text",
+                        "type": "string",
+                        "description": "Text for a text operation.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "delta_y",
+                        "type": "integer",
+                        "description": "Vertical pixel delta for scrolling.",
+                        "required": false,
+                    ],
+                    [
+                        "name": "delta_x",
+                        "type": "integer",
+                        "description": "Horizontal pixel delta for scrolling.",
+                        "required": false,
+                    ],
+                ],
+            ],
+            [
+                "name": "locate_ui",
+                "description": """
+                Locate one visible control in the active window using the current \
+                screenshot and return a global click point. Use only when the \
+                control is missing from inspect_ui.
+                """,
+                "permission": "read_only",
+                "parameters": [
+                    [
+                        "name": "target",
+                        "type": "string",
+                        "description": "Visible control to locate, such as the Play button.",
+                        "required": true,
+                    ]
+                ],
+            ],
+            [
+                "name": "verify_ui",
+                "description": """
+                Compare the before and after active-window images for a grounded \
+                control click and verify that the named control produced the \
+                intended visible result.
+                """,
+                "permission": "read_only",
+                "parameters": [
+                    [
+                        "name": "target",
+                        "type": "string",
+                        "description": "The control that was clicked.",
+                        "required": true,
+                    ],
+                    [
+                        "name": "visual_token",
+                        "type": "string",
+                        "description": "Snapshot token returned by locate_ui.",
+                        "required": true,
                     ],
                 ],
             ],
@@ -498,7 +612,7 @@ final class MacPrimitiveProvider {
         case "list_apps":
             return listApps(arguments: arguments)
         case "open_app":
-            return openApp(arguments: arguments)
+            return await openApp(arguments: arguments)
         case "open_path":
             return await openPath(arguments: arguments)
         case "open_url":
@@ -513,8 +627,16 @@ final class MacPrimitiveProvider {
             return muteAudio(arguments: arguments)
         case "inspect_ui":
             return inspectUI(arguments: arguments)
+        case "observe_screen":
+            return await observeScreen()
         case "interact_ui":
             return interactUI(arguments: arguments)
+        case "input_control":
+            return inputControl(arguments: arguments)
+        case "locate_ui":
+            return await locateUI(arguments: arguments)
+        case "verify_ui":
+            return await verifyUI(arguments: arguments)
         default:
             return envelope(ok: false, error: "unknown Mac primitive: \(tool)")
         }
@@ -589,24 +711,50 @@ final class MacPrimitiveProvider {
         return response
     }
 
-    private func openApp(arguments: [String: Any]) -> String {
+    private func openApp(arguments: [String: Any]) async -> String {
         guard let requested = arguments["app"] as? String,
               !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return envelope(ok: false, error: "app is required")
         }
 
         if let running = findRunningApplication(requested) {
-            let activated = running.activate()
-            return envelope(
-                ok: activated,
-                spoken: activated ? "Brought \(running.localizedName ?? requested) to the front." : nil,
-                data: [
-                    "name": running.localizedName ?? requested,
-                    "bundleId": running.bundleIdentifier ?? "",
-                    "running": true,
-                ],
-                error: activated ? nil : "could not activate \(requested)"
-            )
+            if running.isActive {
+                return envelope(
+                    spoken: "(running.localizedName ?? requested) is already active.",
+                    data: [
+                        "name": running.localizedName ?? requested,
+                        "bundleId": running.bundleIdentifier ?? "",
+                        "running": true,
+                        "active": true,
+                    ]
+                )
+            }
+            guard let applicationURL = running.bundleURL else {
+                return envelope(ok: false, error: "could not resolve (requested)")
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            do {
+                let application = try await NSWorkspace.shared.openApplication(
+                    at: applicationURL,
+                    configuration: configuration
+                )
+                return envelope(
+                    spoken: "Brought (application.localizedName ?? requested) to the front.",
+                    data: [
+                        "name": application.localizedName ?? requested,
+                        "bundleId": application.bundleIdentifier ?? "",
+                        "running": true,
+                        "activationRequested": true,
+                    ]
+                )
+            } catch {
+                return envelope(
+                    ok: false,
+                    error: "could not activate (requested): (error.localizedDescription)"
+                )
+            }
         }
 
         guard let url = findInstalledApplication(requested) else {
@@ -615,16 +763,28 @@ final class MacPrimitiveProvider {
                 data: ["error": "app_not_found", "app": requested]
             )
         }
-        let opened = NSWorkspace.shared.open(url)
-        return envelope(
-            ok: opened,
-            spoken: opened ? "Opened \(url.deletingPathExtension().lastPathComponent)." : nil,
-            data: [
-                "path": url.path,
-                "bundleId": Bundle(url: url)?.bundleIdentifier ?? "",
-            ],
-            error: opened ? nil : "could not open \(requested)"
-        )
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        do {
+            let application = try await NSWorkspace.shared.openApplication(
+                at: url,
+                configuration: configuration
+            )
+            return envelope(
+                spoken: "Opened (application.localizedName ?? url.deletingPathExtension().lastPathComponent).",
+                data: [
+                    "path": url.path,
+                    "bundleId": application.bundleIdentifier ?? "",
+                    "activationRequested": true,
+                ]
+            )
+        } catch {
+            return envelope(
+                ok: false,
+                error: "could not open (requested): (error.localizedDescription)"
+            )
+        }
     }
 
     private func openPath(arguments: [String: Any]) async -> String {
@@ -1090,19 +1250,21 @@ final class MacPrimitiveProvider {
                 data: ["error": "app_not_running"]
             )
         }
-        let requestedLimit = arguments["max_elements"] as? Int ?? 40
-        let limit = max(1, min(requestedLimit, 60))
+        let requestedLimit = arguments["max_elements"] as? Int ?? 50
+        let limit = max(1, min(requestedLimit, 80))
         let root = AXUIElementCreateApplication(app.processIdentifier)
         elementCache.removeAll(keepingCapacity: true)
+        elementSnapshotID = UUID().uuidString.lowercased()
 
         var output: [[String: Any]] = []
         var stack: [(AXUIElement, Int)] = [(root, 0)]
-        while let (element, depth) = stack.popLast(), output.count < limit {
-            let elementID = "ui-\(output.count + 1)"
-            elementCache[elementID] = element
+        var visited = 0
+        while let (element, depth) = stack.popLast(),
+              output.count < limit,
+              visited < 500 {
+            visited += 1
 
             var item: [String: Any] = [
-                "id": elementID,
                 "depth": depth,
                 "role": stringAttribute(element, kAXRoleAttribute) ?? "unknown",
             ]
@@ -1140,7 +1302,20 @@ final class MacPrimitiveProvider {
             if !actions.isEmpty {
                 item["actions"] = actions
             }
-            output.append(item)
+            addBounds(from: element, to: &item)
+
+            let hasUsefulText = ["title", "description", "value", "identifier"]
+                .contains { item[$0] != nil }
+            let shouldReturn = depth == 0
+                || hasUsefulText
+                || !actions.isEmpty
+                || Self.isControlRole(role)
+            if shouldReturn {
+                let elementID = "\(elementSnapshotID)-ui-\(output.count + 1)"
+                item["id"] = elementID
+                elementCache[elementID] = element
+                output.append(item)
+            }
 
             if depth < 10 {
                 let children = childrenOf(element)
@@ -1155,6 +1330,7 @@ final class MacPrimitiveProvider {
         var response = inspectUIEnvelope(
             appName: appName,
             bundleID: app.bundleIdentifier ?? "",
+            snapshotID: elementSnapshotID,
             elements: output,
             truncated: wasTruncated
         )
@@ -1164,11 +1340,23 @@ final class MacPrimitiveProvider {
             response = inspectUIEnvelope(
                 appName: appName,
                 bundleID: app.bundleIdentifier ?? "",
+                snapshotID: elementSnapshotID,
                 elements: output,
                 truncated: wasTruncated
             )
         }
         return response
+    }
+
+    private func observeScreen() async -> String {
+        let state = await ComputerPerceptionProvider.shared.screenState()
+        let available = state["available"] as? Bool == true
+        return envelope(
+            ok: available,
+            spoken: available ? "Observed the active window." : nil,
+            data: state,
+            error: available ? nil : (state["error"] as? String ?? "screen state unavailable")
+        )
     }
 
     private func listAppsEnvelope(
@@ -1188,6 +1376,7 @@ final class MacPrimitiveProvider {
     private func inspectUIEnvelope(
         appName: String,
         bundleID: String,
+        snapshotID: String,
         elements: [[String: Any]],
         truncated: Bool
     ) -> String {
@@ -1196,6 +1385,7 @@ final class MacPrimitiveProvider {
             data: [
                 "app": appName,
                 "bundleId": bundleID,
+                "snapshotId": snapshotID,
                 "elements": elements,
                 "truncated": truncated,
                 "next": "Use an exact element id and advertised action with interact_ui.",
@@ -1268,6 +1458,186 @@ final class MacPrimitiveProvider {
         )
     }
 
+    private func locateUI(arguments: [String: Any]) async -> String {
+        guard let target = arguments["target"] as? String,
+              !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return envelope(ok: false, error: "target is required")
+        }
+        guard let port = BootCoordinator.shared.servicePort else {
+            return envelope(ok: false, error: "local service is not ready")
+        }
+        let result = await ComputerPerceptionProvider.shared.locateControl(
+            target: target,
+            client: LocalServiceClient(port: port)
+        )
+        let ok = result["found"] as? Bool == true
+        return envelope(
+            ok: ok,
+            spoken: ok ? "Located \(target)." : "I could not locate \(target) visually.",
+            data: result,
+            error: ok ? nil : (result["error"] as? String ?? "visual target not found")
+        )
+    }
+
+    private func verifyUI(arguments: [String: Any]) async -> String {
+        guard let target = arguments["target"] as? String,
+              !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let visualToken = arguments["visual_token"] as? String,
+              !visualToken.isEmpty else {
+            return envelope(ok: false, error: "target and visual_token are required")
+        }
+        guard let port = BootCoordinator.shared.servicePort else {
+            return envelope(ok: false, error: "local service is not ready")
+        }
+        let result = await ComputerPerceptionProvider.shared.verifyAction(
+            target: target,
+            visualToken: visualToken,
+            client: LocalServiceClient(port: port)
+        )
+        let succeeded = result["succeeded"] as? Bool == true
+        return envelope(
+            ok: succeeded,
+            spoken: succeeded ? "Verified the visible result." : nil,
+            data: result,
+            error: succeeded ? nil : (result["reason"] as? String
+                ?? result["error"] as? String
+                ?? "the visible result did not match the requested control")
+        )
+    }
+
+    private func inputControl(arguments: [String: Any]) -> String {
+        guard AXIsProcessTrusted() else {
+            return envelope(
+                ok: false,
+                data: ["error": "accessibility_permission_required"],
+                error: "Friday does not have Accessibility permission"
+            )
+        }
+        let operation = (arguments["operation"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch operation {
+        case "click", "double_click":
+            guard let x = numberArgument(arguments["x"]),
+                  let y = numberArgument(arguments["y"]),
+                  x.isFinite,
+                  y.isFinite,
+                  abs(x) < 100_000,
+                  abs(y) < 100_000 else {
+                return envelope(ok: false, error: "valid x and y coordinates are required")
+            }
+            let point = CGPoint(x: x, y: y)
+            let clicks = operation == "double_click" ? 2 : 1
+            for click in 1...clicks {
+                guard let down = CGEvent(
+                    mouseEventSource: nil,
+                    mouseType: .leftMouseDown,
+                    mouseCursorPosition: point,
+                    mouseButton: .left
+                ),
+                      let up = CGEvent(
+                        mouseEventSource: nil,
+                        mouseType: .leftMouseUp,
+                        mouseCursorPosition: point,
+                        mouseButton: .left
+                      ) else {
+                    return envelope(ok: false, error: "could not create mouse input")
+                }
+                down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
+                up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
+            }
+            return envelope(
+                spoken: operation == "double_click" ? "Double-clicked." : "Clicked.",
+                data: ["operation": operation, "x": x, "y": y]
+            )
+        case "key":
+            guard let rawKey = arguments["key"] as? String,
+                  let keyCode = keyCode(for: rawKey) else {
+                return envelope(ok: false, error: "a supported key is required")
+            }
+            let flags = modifierFlags(arguments["modifiers"])
+            guard let down = CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: keyCode,
+                keyDown: true
+            ),
+                  let up = CGEvent(
+                    keyboardEventSource: nil,
+                    virtualKey: keyCode,
+                    keyDown: false
+                  ) else {
+                return envelope(ok: false, error: "could not create keyboard input")
+            }
+            down.flags = flags
+            up.flags = flags
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            return envelope(
+                spoken: "Pressed \(rawKey).",
+                data: ["operation": operation, "key": rawKey]
+            )
+        case "text":
+            guard let text = arguments["text"] as? String,
+                  !text.isEmpty,
+                  text.count <= 2_000 else {
+                return envelope(ok: false, error: "text from 1 to 2000 characters is required")
+            }
+            var characters = Array(text.utf16)
+            guard let down = CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: 0,
+                keyDown: true
+            ),
+                  let up = CGEvent(
+                    keyboardEventSource: nil,
+                    virtualKey: 0,
+                    keyDown: false
+                  ) else {
+                return envelope(ok: false, error: "could not create text input")
+            }
+            down.keyboardSetUnicodeString(
+                stringLength: characters.count,
+                unicodeString: &characters
+            )
+            up.keyboardSetUnicodeString(
+                stringLength: characters.count,
+                unicodeString: &characters
+            )
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            return envelope(
+                spoken: "Entered the text.",
+                data: ["operation": operation, "characters": text.count]
+            )
+        case "scroll":
+            let deltaY = Int32(arguments["delta_y"] as? Int ?? 0)
+            let deltaX = Int32(arguments["delta_x"] as? Int ?? 0)
+            guard deltaY != 0 || deltaX != 0,
+                  let event = CGEvent(
+                    scrollWheelEvent2Source: nil,
+                    units: .pixel,
+                    wheelCount: 2,
+                    wheel1: deltaY,
+                    wheel2: deltaX,
+                    wheel3: 0
+                  ) else {
+                return envelope(ok: false, error: "a non-zero scroll delta is required")
+            }
+            event.post(tap: .cghidEventTap)
+            return envelope(
+                spoken: "Scrolled.",
+                data: ["operation": operation, "deltaY": deltaY, "deltaX": deltaX]
+            )
+        default:
+            return envelope(
+                ok: false,
+                error: "operation must be click, double_click, key, text, or scroll"
+            )
+        }
+    }
+
     private func installedApplicationURLs() -> [URL] {
         let roots = [
             URL(fileURLWithPath: "/Applications", isDirectory: true),
@@ -1293,16 +1663,17 @@ final class MacPrimitiveProvider {
     }
 
     private func findRunningApplication(_ requested: String) -> NSRunningApplication? {
-        let needle = requested.trimmingCharacters(in: .whitespacesAndNewlines)
-        return NSWorkspace.shared.runningApplications.first { app in
-            app.bundleIdentifier?.caseInsensitiveCompare(needle) == .orderedSame
-                || app.localizedName?.caseInsensitiveCompare(needle) == .orderedSame
-                || app.localizedName?
-                    .replacingOccurrences(of: " ", with: "")
-                    .caseInsensitiveCompare(
-                        needle.replacingOccurrences(of: " ", with: "")
-                    ) == .orderedSame
-        }
+        NSWorkspace.shared.runningApplications
+            .compactMap { app -> (NSRunningApplication, Int)? in
+                let score = applicationMatchScore(
+                    requested: requested,
+                    name: app.localizedName ?? "",
+                    bundleID: app.bundleIdentifier ?? ""
+                )
+                return score > 0 ? (app, score) : nil
+            }
+            .max { $0.1 < $1.1 }?
+            .0
     }
 
     private func findInstalledApplication(_ requested: String) -> URL? {
@@ -1311,17 +1682,52 @@ final class MacPrimitiveProvider {
         ) {
             return bundleURL
         }
-        let needle = requested.trimmingCharacters(in: .whitespacesAndNewlines)
-        return installedApplicationURLs().first { url in
+        return installedApplicationURLs().compactMap { url -> (URL, Int)? in
             let bundle = Bundle(url: url)
             let displayName =
                 bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
                 ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
                 ?? url.deletingPathExtension().lastPathComponent
-            return displayName.caseInsensitiveCompare(needle) == .orderedSame
-                || url.deletingPathExtension().lastPathComponent
-                    .caseInsensitiveCompare(needle) == .orderedSame
+            let score = max(
+                applicationMatchScore(
+                    requested: requested,
+                    name: displayName,
+                    bundleID: bundle?.bundleIdentifier ?? ""
+                ),
+                applicationMatchScore(
+                    requested: requested,
+                    name: url.deletingPathExtension().lastPathComponent,
+                    bundleID: bundle?.bundleIdentifier ?? ""
+                )
+            )
+            return score > 0 ? (url, score) : nil
+        }.max { $0.1 < $1.1 }?.0
+    }
+
+    private func applicationMatchScore(
+        requested: String,
+        name: String,
+        bundleID: String
+    ) -> Int {
+        let rawNeedle = requested.trimmingCharacters(in: .whitespacesAndNewlines)
+        if bundleID.caseInsensitiveCompare(rawNeedle) == .orderedSame {
+            return 120
         }
+        let needle = normalizedApplicationName(rawNeedle)
+        let candidate = normalizedApplicationName(name)
+        guard !needle.isEmpty, !candidate.isEmpty else { return 0 }
+        if needle == candidate { return 110 }
+        guard needle.count >= 3 else { return 0 }
+        if candidate.hasPrefix(needle) || needle.hasPrefix(candidate) { return 80 }
+        if candidate.contains(needle) || needle.contains(candidate) { return 60 }
+        return 0
+    }
+
+    private func normalizedApplicationName(_ value: String) -> String {
+        value.lowercased().unicodeScalars
+            .filter(CharacterSet.alphanumerics.contains)
+            .map(String.init)
+            .joined()
     }
 
     private func normalizedWebURL(_ rawValue: String) -> URL? {
@@ -1432,6 +1838,76 @@ final class MacPrimitiveProvider {
         if let value = stringAttribute(element, attribute), !value.isEmpty {
             output[key] = value
         }
+    }
+
+    private func addBounds(
+        from element: AXUIElement,
+        to output: inout [String: Any]
+    ) {
+        guard let positionValue = attribute(element, kAXPositionAttribute),
+              CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              let sizeValue = attribute(element, kAXSizeAttribute),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return }
+        let positionAXValue = unsafeBitCast(positionValue, to: AXValue.self)
+        let sizeAXValue = unsafeBitCast(sizeValue, to: AXValue.self)
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAXValue, .cgPoint, &position),
+              AXValueGetValue(sizeAXValue, .cgSize, &size) else { return }
+        output["bounds"] = [
+            "x": position.x,
+            "y": position.y,
+            "width": size.width,
+            "height": size.height,
+        ]
+    }
+
+    private func numberArgument(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? NSNumber { return value.doubleValue }
+        return nil
+    }
+
+    private func modifierFlags(_ raw: Any?) -> CGEventFlags {
+        guard let values = raw as? [String] else { return [] }
+        return values.reduce(into: CGEventFlags()) { flags, value in
+            switch value.lowercased() {
+            case "command", "cmd": flags.insert(.maskCommand)
+            case "option", "alt": flags.insert(.maskAlternate)
+            case "control", "ctrl": flags.insert(.maskControl)
+            case "shift": flags.insert(.maskShift)
+            default: break
+            }
+        }
+    }
+
+    private func keyCode(for raw: String) -> CGKeyCode? {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let named: [String: CGKeyCode] = [
+            "return": 36,
+            "enter": 36,
+            "tab": 48,
+            "space": 49,
+            "delete": 51,
+            "backspace": 51,
+            "escape": 53,
+            "esc": 53,
+            "left": 123,
+            "right": 124,
+            "down": 125,
+            "up": 126,
+        ]
+        if let code = named[key] { return code }
+        let letters: [Character: CGKeyCode] = [
+            "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5,
+            "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12,
+            "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31,
+            "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40,
+            "n": 45, "m": 46,
+        ]
+        guard key.count == 1, let character = key.first else { return nil }
+        return letters[character]
     }
 
     private func accessibilityAction(_ action: String) -> String {

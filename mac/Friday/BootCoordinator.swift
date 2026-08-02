@@ -1,6 +1,6 @@
 import Foundation
 
-/// Orchestrates startup: spawn local_service → wait for port → health → token → LiveKit connect → events WS.
+/// Orchestrates startup: spawn local service, connect events, mint a token, then connect LiveKit.
 @MainActor
 final class BootCoordinator {
     static let shared = BootCoordinator()
@@ -27,6 +27,7 @@ final class BootCoordinator {
             client = c
 
             try await c.health()
+            startEventStream(client: c)
             let token = try await c.mintToken()
             try await liveKit.connect(token: token, servicePort: port)
 
@@ -36,37 +37,46 @@ final class BootCoordinator {
                 }
             }
 
-            // Subscribe to local_service events.
-            eventTask = c.openEventStream(
-                onEventJSON: { json in
-                    guard let data = json.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let type = obj["type"] as? String else { return }
-                    switch type {
-                    case "wake_detected":
-                        let confidence = obj["confidence"] as? Double ?? 0
-                        Task { @MainActor in
-                            self.liveKit.handleWakeDetected(
-                                confidence: Float(confidence)
-                            )
-                        }
-                    case "profile_updated":
-                        Task { @MainActor in
-                            await self.liveKit.forwardProfileUpdated(json: json)
-                        }
-                    default:
-                        break
-                    }
-                },
-                onError: { err in
-                    NSLog("[Friday] events WS error: \(err)")
-                    Task { @MainActor in AppState.shared.set(.error, error: "events WS dropped") }
-                }
-            )
         } catch {
             NSLog("[Friday] boot failed: \(error)")
             AppState.shared.set(.error, error: error.localizedDescription)
         }
+    }
+
+    private func startEventStream(client: LocalServiceClient) {
+        eventTask?.cancel()
+        eventTask = client.openEventStream(
+            onEventJSON: { json in
+                guard let data = json.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data)
+                        as? [String: Any],
+                      let type = obj["type"] as? String else { return }
+                switch type {
+                case "wake_detected":
+                    let confidence = obj["confidence"] as? Double ?? 0
+                    Task { @MainActor in
+                        self.liveKit.handleWakeDetected(
+                            confidence: Float(confidence)
+                        )
+                    }
+                case "profile_updated":
+                    Task { @MainActor in
+                        await self.liveKit.forwardProfileUpdated(json: json)
+                    }
+                default:
+                    break
+                }
+            },
+            onNativeToolRequest: { json in
+                await MacPrimitiveProvider.shared.execute(jsonPayload: json)
+            },
+            onError: { err in
+                NSLog("[Friday] events WS error: \(err)")
+                Task { @MainActor in
+                    AppState.shared.set(.error, error: "events WS dropped")
+                }
+            }
+        )
     }
 
     func shutdown() async {

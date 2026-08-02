@@ -131,6 +131,8 @@ class ActionCatalogTests(unittest.TestCase):
 
         self.assertIsNone(catalog.match("Set volume to 101."))
         self.assertIsNone(catalog.match("Open VS Code and analyze the project."))
+        self.assertIsNone(catalog.match("Open Minecraft and press Play."))
+        self.assertIsNone(catalog.match("Open Arc and click the first video."))
 
     def test_priority_resolves_overlapping_integration_routes(self) -> None:
         catalog = ActionCatalog(

@@ -25,6 +25,17 @@ private func perceptionAXObserverCallback(
 final class ComputerPerceptionProvider {
     static let shared = ComputerPerceptionProvider()
 
+    private struct OCRRegion: Sendable {
+        let text: String
+        let boundingBox: CGRect
+        let confidence: Float
+    }
+
+    private struct OCRSnapshot: Sendable {
+        let text: String
+        let regions: [OCRRegion]
+    }
+
     private static let maximumImageWidth: CGFloat = 1_200
     private static let imageMaxAge: TimeInterval = 30
     private static let minimumBackgroundCaptureInterval: TimeInterval = 2
@@ -75,7 +86,11 @@ final class ComputerPerceptionProvider {
     private var latestImageCapturedAt: Date?
     private var latestImageProcessID: pid_t?
     private var latestImageFingerprint: Int?
+    private var latestPerceptualFingerprint: String?
+    private var latestWindowFrame: CGRect?
     private var latestOCRText = ""
+    private var latestOCRRegions: [OCRRegion] = []
+    private var actionSnapshots: [String: Data] = [:]
     private var latestRefreshAt = Date.distantPast
     private var isStarted = false
 
@@ -111,7 +126,11 @@ final class ComputerPerceptionProvider {
         latestImageCapturedAt = nil
         latestImageProcessID = nil
         latestImageFingerprint = nil
+        latestPerceptualFingerprint = nil
+        latestWindowFrame = nil
         latestOCRText = ""
+        latestOCRRegions = []
+        actionSnapshots.removeAll()
         isStarted = false
     }
 
@@ -121,6 +140,45 @@ final class ComputerPerceptionProvider {
             context["imageAgeMs"] = max(0, Date().timeIntervalSince(capturedAt) * 1_000)
         }
         return context
+    }
+
+    func screenState() async -> [String: Any] {
+        await refresh(reason: "computer_control", capture: true)
+        let context = cachedContext()
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              latestImageProcessID == app.processIdentifier,
+              let fingerprint = latestPerceptualFingerprint else {
+            return [
+                "available": false,
+                "error": "no current active-window image is available",
+            ]
+        }
+        var state: [String: Any] = [
+            "available": true,
+            "app": app.localizedName ?? app.bundleIdentifier ?? "Unknown",
+            "bundleId": app.bundleIdentifier ?? "",
+            "processId": Int(app.processIdentifier),
+            "visualFingerprint": fingerprint,
+            "ocrText": String(latestOCRText.prefix(2_500)),
+            "capturedAt": ISO8601DateFormatter().string(
+                from: latestImageCapturedAt ?? Date()
+            ),
+        ]
+        if let windowID = context["windowId"] {
+            state["windowId"] = windowID
+        }
+        if let currentWindow = context["currentWindow"] {
+            state["windowTitle"] = currentWindow
+        }
+        if let latestWindowFrame {
+            state["windowFrame"] = [
+                "x": latestWindowFrame.minX,
+                "y": latestWindowFrame.minY,
+                "width": latestWindowFrame.width,
+                "height": latestWindowFrame.height,
+            ]
+        }
+        return state
     }
 
     func contextForTurn(
@@ -185,6 +243,122 @@ final class ComputerPerceptionProvider {
             ]
         }
         return context
+    }
+
+    func locateControl(
+        target: String,
+        client: LocalServiceClient
+    ) async -> [String: Any] {
+        let cleanedTarget = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedTarget.isEmpty else {
+            return ["found": false, "error": "target is required"]
+        }
+        await refresh(reason: "voice_turn", capture: true)
+        let context = cachedContext()
+        guard let bundleID = (
+            context["application"] as? [String: Any]
+        )?["bundleId"] as? String,
+              !Self.sensitiveBundleIDs.contains(bundleID) else {
+            return [
+                "found": false,
+                "error": "visual location is disabled for security-sensitive applications",
+            ]
+        }
+        guard let latestImage,
+              let latestWindowFrame,
+              latestImageProcessID == NSWorkspace.shared.frontmostApplication?
+                .processIdentifier else {
+            return [
+                "found": false,
+                "error": "no current active-window image is available",
+            ]
+        }
+        let visualToken = UUID().uuidString.lowercased()
+        actionSnapshots[visualToken] = latestImage
+        while actionSnapshots.count > 4, let oldest = actionSnapshots.keys.first {
+            actionSnapshots.removeValue(forKey: oldest)
+        }
+        if let local = localOCRLocation(for: cleanedTarget) {
+            let normalizedX = local.region.boundingBox.midX
+            let normalizedY = 1 - local.region.boundingBox.midY
+            return locatedResult(
+                base: [
+                    "found": true,
+                    "confidence": local.score,
+                    "description": local.region.text,
+                    "method": "local_ocr",
+                ],
+                normalizedX: normalizedX,
+                normalizedY: normalizedY,
+                frame: latestWindowFrame,
+                context: context,
+                visualToken: visualToken
+            )
+        }
+        do {
+            let result = try await client.locateVisualControl(
+                target: cleanedTarget,
+                imageData: latestImage,
+                mimeType: "image/jpeg",
+                ocrText: latestOCRText,
+                metadata: Self.visualMetadata(from: context)
+            )
+            guard result["found"] as? Bool == true,
+                  let normalizedX = Self.number(result["x"]),
+                  let normalizedY = Self.number(result["y"]),
+                  (0...1).contains(normalizedX),
+                  (0...1).contains(normalizedY) else {
+                return result
+            }
+            return locatedResult(
+                base: result.merging(["method": "visual_model"]) { current, _ in current },
+                normalizedX: normalizedX,
+                normalizedY: normalizedY,
+                frame: latestWindowFrame,
+                context: context,
+                visualToken: visualToken
+            )
+        } catch {
+            return [
+                "found": false,
+                "error": "visual location could not be completed",
+            ]
+        }
+    }
+
+    func verifyAction(
+        target: String,
+        visualToken: String,
+        client: LocalServiceClient
+    ) async -> [String: Any] {
+        guard let beforeImage = actionSnapshots.removeValue(forKey: visualToken) else {
+            return [
+                "succeeded": false,
+                "error": "visual action snapshot expired",
+            ]
+        }
+        await refresh(reason: "voice_turn", capture: true)
+        guard let afterImage = latestImage,
+              latestImageProcessID == NSWorkspace.shared.frontmostApplication?
+                .processIdentifier else {
+            return [
+                "succeeded": false,
+                "error": "no post-action window image is available",
+            ]
+        }
+        do {
+            return try await client.verifyVisualAction(
+                target: target,
+                beforeImageData: beforeImage,
+                afterImageData: afterImage,
+                mimeType: "image/jpeg"
+            )
+        } catch {
+            return [
+                "succeeded": false,
+                "error": "visual action verification could not be completed",
+            ]
+        }
     }
 
     func handleAccessibilityEvent(_ notification: String) {
@@ -267,7 +441,10 @@ final class ComputerPerceptionProvider {
             latestImageCapturedAt = nil
             latestImageProcessID = nil
             latestImageFingerprint = nil
+            latestPerceptualFingerprint = nil
+            latestWindowFrame = nil
             latestOCRText = ""
+            latestOCRRegions = []
             context["captureStatus"] = "blocked_sensitive_application"
             context["ocrText"] = ""
             latestContext = context
@@ -285,7 +462,11 @@ final class ComputerPerceptionProvider {
             } == true
         let shouldCapture = capture
             && (!resourceConstrained || reason == "voice_turn")
-            && (reason == "voice_turn" || !capturedCurrentApplicationRecently)
+            && (
+                reason == "voice_turn"
+                    || reason == "computer_control"
+                    || !capturedCurrentApplicationRecently
+            )
         guard shouldCapture, CGPreflightScreenCaptureAccess() else {
             if capture, !CGPreflightScreenCaptureAccess() {
                 context["captureStatus"] = "permission_required"
@@ -311,17 +492,22 @@ final class ComputerPerceptionProvider {
             )
             let jpeg = try Self.jpegData(from: captured.image)
             let fingerprint = jpeg.hashValue
+            let perceptualFingerprint = Self.perceptualFingerprint(from: captured.image)
             let changed = fingerprint != latestImageFingerprint
             var ocrLatency = 0.0
             if changed {
                 let ocrStarted = Date()
-                latestOCRText = try await Self.recognizeText(in: captured.image)
+                let recognized = try await Self.recognizeText(in: captured.image)
+                latestOCRText = recognized.text
+                latestOCRRegions = recognized.regions
                 ocrLatency = Date().timeIntervalSince(ocrStarted) * 1_000
                 latestImage = jpeg
                 latestImageFingerprint = fingerprint
             }
             latestImageCapturedAt = Date()
             latestImageProcessID = app.processIdentifier
+            latestWindowFrame = captured.frame
+            latestPerceptualFingerprint = perceptualFingerprint
             context["captureStatus"] = "captured"
             context["imageAvailable"] = true
             context["imageChanged"] = changed
@@ -345,7 +531,10 @@ final class ComputerPerceptionProvider {
                 latestImageCapturedAt = nil
                 latestImageProcessID = nil
                 latestImageFingerprint = nil
+                latestPerceptualFingerprint = nil
+                latestWindowFrame = nil
                 latestOCRText = ""
+                latestOCRRegions = []
             }
             context["imageAvailable"] = latestImage != nil
             context["ocrText"] = String(latestOCRText.prefix(2_500))
@@ -404,6 +593,7 @@ final class ComputerPerceptionProvider {
     private struct CapturedWindow {
         let image: CGImage
         let windowID: UInt32
+        let frame: CGRect
     }
 
     private func captureActiveWindow(
@@ -451,7 +641,11 @@ final class ComputerPerceptionProvider {
             contentFilter: filter,
             configuration: configuration
         )
-        return CapturedWindow(image: image, windowID: window.windowID)
+        return CapturedWindow(
+            image: image,
+            windowID: window.windowID,
+            frame: window.frame
+        )
     }
 
     private nonisolated static func jpegData(from image: CGImage) throws -> Data {
@@ -476,7 +670,45 @@ final class ComputerPerceptionProvider {
         return data
     }
 
-    private nonisolated static func recognizeText(in image: CGImage) async throws -> String {
+    private nonisolated static func perceptualFingerprint(
+        from image: CGImage
+    ) -> String {
+        let width = 9
+        let height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let drewImage = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drewImage else {
+            return ""
+        }
+        var hash: UInt64 = 0
+        var bit: UInt64 = 1
+        for y in 0..<height {
+            for x in 0..<(width - 1) {
+                if pixels[y * width + x] > pixels[y * width + x + 1] {
+                    hash |= bit
+                }
+                bit <<= 1
+            }
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private nonisolated static func recognizeText(
+        in image: CGImage
+    ) async throws -> OCRSnapshot {
         try await Task.detached(priority: .utility) {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .fast
@@ -494,16 +726,97 @@ final class ComputerPerceptionProvider {
                 return left.boundingBox.minX < right.boundingBox.minX
             }
             var lines: [String] = []
+            var regions: [OCRRegion] = []
             var characterCount = 0
             for observation in observations {
-                guard let text = observation.topCandidates(1).first?.string,
-                      !text.isEmpty else { continue }
+                guard let candidate = observation.topCandidates(1).first,
+                      !candidate.string.isEmpty else { continue }
+                let text = candidate.string
                 if characterCount + text.count + 1 > 10_000 { break }
                 lines.append(text)
+                regions.append(
+                    OCRRegion(
+                        text: text,
+                        boundingBox: observation.boundingBox,
+                        confidence: candidate.confidence
+                    )
+                )
                 characterCount += text.count + 1
             }
-            return lines.joined(separator: "\n")
+            return OCRSnapshot(
+                text: lines.joined(separator: "\n"),
+                regions: regions
+            )
         }.value
+    }
+
+    private func locatedResult(
+        base: [String: Any],
+        normalizedX: CGFloat,
+        normalizedY: CGFloat,
+        frame: CGRect,
+        context: [String: Any],
+        visualToken: String
+    ) -> [String: Any] {
+        var located = base
+        located["x"] = frame.minX + normalizedX * frame.width
+        located["y"] = frame.minY + normalizedY * frame.height
+        located["normalizedX"] = normalizedX
+        located["normalizedY"] = normalizedY
+        located["visualFingerprint"] = latestPerceptualFingerprint ?? ""
+        located["processId"] = Int(latestImageProcessID ?? 0)
+        located["windowId"] = context["windowId"]
+        located["ocrText"] = String(latestOCRText.prefix(2_500))
+        located["app"] = NSWorkspace.shared.frontmostApplication?
+            .localizedName ?? ""
+        located["visualToken"] = visualToken
+        located["windowFrame"] = [
+            "x": frame.minX,
+            "y": frame.minY,
+            "width": frame.width,
+            "height": frame.height,
+        ]
+        return located
+    }
+
+    private func localOCRLocation(
+        for target: String
+    ) -> (region: OCRRegion, score: Double)? {
+        let stopWords: Set<String> = [
+            "button", "click", "choose", "control", "hit", "open", "press", "select",
+            "the", "to",
+        ]
+        let targetTerms = Self.normalizedTerms(target).filter { !stopWords.contains($0) }
+        guard let firstTarget = targetTerms.first else { return nil }
+        let targetText = targetTerms.joined(separator: " ")
+        let targetSet = Set(targetTerms)
+        let candidates = latestOCRRegions.compactMap { region -> (OCRRegion, Double)? in
+            let terms = Self.normalizedTerms(region.text)
+            guard !terms.isEmpty else { return nil }
+            let text = terms.joined(separator: " ")
+            let score: Double
+            if text == targetText {
+                score = 0.99
+            } else if text.contains(targetText) {
+                score = 0.94
+            } else {
+                let overlap = Double(Set(terms).intersection(targetSet).count)
+                guard overlap > 0 else { return nil }
+                let coverage = overlap / Double(max(targetSet.count, terms.count))
+                score = min(0.93, coverage + (terms.first == firstTarget ? 0.35 : 0))
+            }
+            guard score >= 0.72 else { return nil }
+            return (region, score * max(0.75, Double(region.confidence)))
+        }.sorted { $0.1 > $1.1 }
+        guard let best = candidates.first else { return nil }
+        if candidates.count > 1, abs(best.1 - candidates[1].1) < 0.04 {
+            return nil
+        }
+        return best
+    }
+
+    private nonisolated static func normalizedTerms(_ value: String) -> [String] {
+        value.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
 
     private static func requiresVisualAnalysis(_ query: String) -> Bool {
@@ -539,6 +852,13 @@ final class ComputerPerceptionProvider {
             }
         }
         return metadata
+    }
+
+    private static func number(_ value: Any?) -> CGFloat? {
+        if let value = value as? Double { return CGFloat(value) }
+        if let value = value as? Int { return CGFloat(value) }
+        if let value = value as? NSNumber { return CGFloat(value.doubleValue) }
+        return nil
     }
 
     private static func thermalStateName(

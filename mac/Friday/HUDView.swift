@@ -7,12 +7,18 @@ struct HUDView: View {
     @State private var presentationBeganAt = Date()
 
     var body: some View {
-        MagicRingsOrb(
-            state: model.state,
-            presentationBeganAt: presentationBeganAt,
-            isActive: model.shouldShowHUD
-        )
-        .frame(width: 126, height: 126)
+        HStack(spacing: 12) {
+            stateLabel
+
+            MagicRingsOrb(
+                state: model.state,
+                presentationBeganAt: presentationBeganAt,
+                isActive: model.shouldShowHUD
+            )
+            .frame(width: 126, height: 126)
+            .accessibilityHidden(true)
+        }
+        .padding(.leading, 12)
         .padding(.trailing, 2)
         .padding(.top, 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -33,7 +39,39 @@ struct HUDView: View {
             setPresentation(shouldShow)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Friday \(model.state.rawValue)")
+        .accessibilityLabel("Friday. \(stateTitle)")
+    }
+
+    private var stateLabel: some View {
+        Text(stateTitle.uppercased())
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .tracking(2)
+            .foregroundStyle(stateAccent.opacity(0.92))
+            .shadow(color: .black.opacity(0.95), radius: 5, y: 1)
+            .shadow(color: stateAccent.opacity(0.24), radius: 10)
+            .contentTransition(.opacity)
+            .frame(width: 110, alignment: .trailing)
+            .animation(.easeInOut(duration: 0.32), value: model.state)
+    }
+
+    private var stateTitle: String {
+        switch model.state {
+        case .disconnected: "Offline"
+        case .sleeping: "Friday"
+        case .wakeDetected: "Friday"
+        case .listening: "Listening"
+        case .thinking: "Thinking"
+        case .acting: "Working"
+        case .speaking: "Speaking"
+        case .followupWindow: "Still here"
+        case .error: "Attention"
+        }
+    }
+
+    private var stateAccent: Color {
+        model.state == .error
+            ? Color(red: 1, green: 0.25, blue: 0.38)
+            : Color(red: 0.25, green: 0.92, blue: 1)
     }
 
     private func setPresentation(_ presented: Bool) {

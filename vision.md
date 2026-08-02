@@ -141,6 +141,14 @@ App, window, selection, or page changes
 Use a vision model only when visual reasoning is needed
 ```
 
+The first visual grounding and verification attempt should use `gpt-5.4-mini` with no reasoning so the normal path stays fast.
+Friday should escalate to `gpt-5.6-terra` with low reasoning only when the first result is missing, malformed, or below the confidence threshold.
+A confident negative result is evidence that an action failed and should not be escalated merely because it is negative.
+
+Unfamiliar computer-control goals should follow the same cascade.
+The first planning step should use `gpt-5.4-mini` with low reasoning, while failed steps, malformed plans, explicit failure, and low-confidence plans should route to `gpt-5.6-terra` with low reasoning.
+Known actions and deterministic app flows should continue to bypass models entirely.
+
 Friday should keep a recent local snapshot of the active workspace so questions such as "what does this mean?" do not begin with a slow discovery process.
 It should refresh that snapshot when the focused app, window, page, document, or selection changes and immediately before a context-dependent request when the snapshot may be stale.
 
@@ -281,6 +289,25 @@ UI inspection and interaction as the final fallback
 ```
 
 UI automation is valuable for reach, but it should not be the normal path for apps with reliable APIs, commands, extensions, or agent protocols.
+
+### Stateful computer control
+
+Goals that require several UI steps should run through one reusable computer-control capability rather than depending on the conversational model to remember a loose sequence of primitive calls.
+The capability should keep the complete goal, observe the current environment, perform one bounded action, wait for the expected transition, refresh perception, verify the result, and repeat until it succeeds or reaches a safe limit.
+
+```text
+Goal
+  |
+  v
+Observe -> choose action -> act -> wait -> observe again -> verify
+   ^                                                       |
+   +---------------- retry or recover ---------------------+
+```
+
+The controller should prefer native APIs and structured Accessibility or browser elements.
+Vision-grounded coordinate input should remain a fallback for visible controls that are not exposed structurally.
+This loop belongs inside the capability layer and should reuse the same declared actions and primitives available to the rest of Friday.
+It is generic infrastructure, not one routine per application.
 
 ---
 

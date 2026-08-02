@@ -5,6 +5,7 @@ from typing import Any
 
 from ..config import settings
 from .broker import CapabilityBroker
+from .computer import ComputerControlProvider
 from .providers import (
     CodexProvider,
     FileProvider,
@@ -25,6 +26,7 @@ def load_all() -> CapabilityRuntime:
             FileProvider(),
             ResearchProvider(),
             CodexProvider(),
+            ComputerControlProvider(),
             SpotifyProvider(
                 client_id=settings.spotify_client_id,
                 redirect_uri=settings.spotify_redirect_uri,

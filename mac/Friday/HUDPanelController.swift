@@ -12,7 +12,7 @@ final class HUDPanelController {
 
     init() {
         panel = HUDPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 150, height: 150),
+            contentRect: NSRect(x: 0, y: 0, width: 262, height: 150),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -82,7 +82,7 @@ final class HUDPanelController {
     private func resizeAndPosition(height: CGFloat) {
         let oldFrame = panel.frame
         let screen = activeScreen()
-        let width: CGFloat = 150
+        let width: CGFloat = 262
         let x = screen.visibleFrame.maxX - width - 16
         let y = screen.visibleFrame.maxY - height - 10
         let frame = NSRect(x: x, y: y, width: width, height: height)

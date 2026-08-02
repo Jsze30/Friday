@@ -32,8 +32,36 @@ class Settings(BaseSettings):
     )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     vision_model: str = Field(
-        default="gpt-4.1-mini",
+        default="gpt-5.4-mini",
         alias="FRIDAY_VISION_MODEL",
+    )
+    vision_reasoning_effort: str = Field(
+        default="none",
+        alias="FRIDAY_VISION_REASONING_EFFORT",
+    )
+    vision_escalation_model: str = Field(
+        default="gpt-5.6-terra",
+        alias="FRIDAY_VISION_ESCALATION_MODEL",
+    )
+    vision_escalation_reasoning_effort: str = Field(
+        default="low",
+        alias="FRIDAY_VISION_ESCALATION_REASONING_EFFORT",
+    )
+    computer_model: str = Field(
+        default="gpt-5.4-mini",
+        alias="FRIDAY_COMPUTER_MODEL",
+    )
+    computer_reasoning_effort: str = Field(
+        default="low",
+        alias="FRIDAY_COMPUTER_REASONING_EFFORT",
+    )
+    computer_escalation_model: str = Field(
+        default="gpt-5.6-terra",
+        alias="FRIDAY_COMPUTER_ESCALATION_MODEL",
+    )
+    computer_escalation_reasoning_effort: str = Field(
+        default="low",
+        alias="FRIDAY_COMPUTER_ESCALATION_REASONING_EFFORT",
     )
     cloud_visual_analysis: bool = Field(
         default=True,

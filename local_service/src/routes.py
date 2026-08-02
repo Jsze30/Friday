@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from . import capabilities, perception, profile, runtime, tools
 from .context_store import store as context_store
 from .events import bus
+from .native_bridge import native_bridge
 from .tokens import mint_token
 
 log = logging.getLogger("friday.routes")
@@ -207,6 +208,36 @@ async def perception_analyze(payload: dict) -> dict[str, object]:
         }
 
 
+@router.post("/perception/locate")
+async def perception_locate(payload: dict) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    try:
+        return await perception.locate(payload)
+    except perception.VisualAnalysisError as error:
+        return {
+            "ok": False,
+            "available": True,
+            "found": False,
+            "error": str(error),
+        }
+
+
+@router.post("/perception/verify-action")
+async def perception_verify_action(payload: dict) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    try:
+        return await perception.verify_action(payload)
+    except perception.VisualAnalysisError as error:
+        return {
+            "ok": False,
+            "available": True,
+            "succeeded": False,
+            "error": str(error),
+        }
+
+
 @router.websocket("/wake/audio")
 async def wake_audio(ws: WebSocket) -> None:
     await ws.accept()
@@ -234,11 +265,39 @@ async def wake_audio(ws: WebSocket) -> None:
 async def events_ws(ws: WebSocket) -> None:
     await ws.accept()
     queue = await bus.subscribe()
+    native_bridge.connect()
     log.info("events client connected")
-    try:
+
+    async def send_events() -> None:
         while True:
             event = await queue.get()
             await ws.send_text(json.dumps(event))
+
+    async def receive_responses() -> None:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                native_bridge.handle_response(payload)
+
+    sender = asyncio.create_task(send_events(), name="friday-event-sender")
+    receiver = asyncio.create_task(
+        receive_responses(),
+        name="friday-native-response-receiver",
+    )
+    try:
+        done, pending = await asyncio.wait(
+            {sender, receiver},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:
@@ -246,5 +305,9 @@ async def events_ws(ws: WebSocket) -> None:
     except Exception:
         log.exception("events ws error")
     finally:
+        sender.cancel()
+        receiver.cancel()
+        await asyncio.gather(sender, receiver, return_exceptions=True)
+        native_bridge.disconnect()
         await bus.unsubscribe(queue)
         log.info("events client disconnected")

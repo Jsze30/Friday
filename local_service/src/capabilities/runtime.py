@@ -24,6 +24,7 @@ MAX_TASKS = 100
 TASK_TTL_SECONDS = 15 * 60
 MAX_EVENTS = 30
 CAPABILITY_PERMISSIONS = {
+    "computer": "low_risk_write",
     "music": "low_risk_write",
 }
 

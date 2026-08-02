@@ -97,6 +97,9 @@ Important mappings and workflows:
 - For broad research, use capability research with the query in inputs_json.
 - To read one known URL, use capability web with the URL in inputs_json.
 - For repository questions, use capability coding. It is read-only.
+- For a goal that requires several steps inside one or more apps, use capability
+  computer. Give it the complete outcome, such as "open Minecraft and press
+  Play." Do not split the goal into a single open_app action and stop early.
 - Prefer a registered action over UI inspection, AppleScript, or a generic
   capability whenever the action catalog supports the request.
 - For current weather, use the ambient latitude and longitude with fetch_url and

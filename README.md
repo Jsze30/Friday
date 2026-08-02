@@ -16,9 +16,10 @@ The cloud agent can only reach them through LiveKit RPC calls that are brokered 
 - Runs a spoken assistant powered by Deepgram STT/TTS, routed OpenAI models, and Silero VAD.
 - Gives the assistant one fast `run_action` tool backed by integration-declared action manifests.
 - Gives the assistant one high-level capability runner backed by ranked providers.
+- Runs multi-step native computer goals through a bounded observe, act, wait, and verify loop.
 - Keeps the reusable primitive kernel behind two fallback discovery tools instead of showing every primitive to the model.
 - Runs slow capabilities in cancellable background tasks so the live voice loop can keep responding.
-- Uses macOS Accessibility as a final fallback for unsupported app controls.
+- Uses macOS Accessibility for structured native app controls and visual grounding only when those controls are unavailable.
 - Executes requested actions immediately without confirmation prompts while keeping path and network safeguards.
 - Supplies a live human-readable Core Location place and a fresh local clock as ambient context.
 - Stores stable profile facts locally and injects them into the agent prompt.
@@ -117,7 +118,7 @@ Responsibilities:
 - Store and resolve durable personal reference aliases in SQLite.
 - Register and execute local tools.
 - Rank, execute, verify, retry, and cancel high-level capability providers.
-- Publish wake/profile events over a WebSocket consumed by Swift.
+- Publish wake/profile events and correlated native-control requests over a WebSocket consumed by Swift.
 
 Local service API:
 
@@ -142,7 +143,8 @@ Local service API:
 | `POST /context/facts` | Stores one explicit entity relationship with provenance. |
 | `POST /context/retention/run` | Runs timeline compaction, expiration, and deletion cleanup. |
 | `POST /perception/analyze` | Sends one bounded active-window image to the configured OpenAI vision model when visual reasoning is required. |
-| `WS /events` | Streams local events such as `wake_detected` and `profile_updated`. |
+| `POST /perception/locate` | Grounds one requested visible control to normalized active-window coordinates. |
+| `WS /events` | Streams local events and carries correlated native-tool responses from the signed Mac app. |
 
 ### `agent/`: LiveKit Cloud Agent
 
@@ -195,6 +197,12 @@ Swift menu bar app
       v
 local_service tools/profile/context/token API
 
+Stateful computer capability
+      |
+      | WS /events: native_tool_request / native_tool_response
+      v
+Signed Swift native primitives
+
 Agent structured HUD events
       |
       | LiveKit text stream: friday.hud
@@ -219,24 +227,23 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 3. `local_service` picks a free localhost port, writes it to `~/Library/Application Support/Friday/port`, loads openWakeWord, and starts FastAPI.
 4. Swift polls the port file, creates a `LocalServiceClient`, and calls
    `GET /health`.
-5. Swift calls `POST /token`.
-6. `local_service` returns a LiveKit AccessToken with:
+5. Swift opens `WS /events` to receive wake/profile events and serve correlated native-control requests from `local_service`.
+6. Swift calls `POST /token`.
+7. `local_service` returns a LiveKit AccessToken with:
    - a fresh room name like `friday-<timestamp>-<hex>`;
    - a Mac participant identity like `mac-<hex>`;
    - publish/subscribe/data permissions;
    - room config dispatching the `friday-agent` agent.
-7. Swift connects to LiveKit, publishes one warm microphone track, and replaces outgoing audio with silence while Friday sleeps.
-8. Swift registers RPC methods:
+8. Swift connects to LiveKit, publishes one warm microphone track, and replaces outgoing audio with silence while Friday sleeps.
+9. Swift registers RPC methods:
    - `return_to_sleep`
    - `set_assistant_state`
    - `get_context`
    - `get_turn_context`
    - `capability_call`
    - `tool_call`
-9. LiveKit dispatches the cloud agent into the room.
-10. The agent waits for the Mac participant, fetches profile and location together, fetches the action, capability, and primitive manifests, compiles deterministic action routes, wraps primitives in a proxy toolset, and starts the session with audio input disabled.
-11. Swift opens `WS /events` to receive wake/profile events from
-    `local_service`.
+10. LiveKit dispatches the cloud agent into the room.
+11. The agent waits for the Mac participant, fetches profile and location together, fetches the action, capability, and primitive manifests, compiles deterministic action routes, wraps primitives in a proxy toolset, and starts the session with audio input disabled.
 
 ## Turn Lifecycle
 
@@ -367,6 +374,7 @@ Current capabilities:
 | `research` | `research-direct` | Searches the public web and reads up to five sources in parallel. |
 | `web` | `research-direct` | Reads one exact public URL or performs a web search. |
 | `coding` | `codex-readonly` | Runs an ephemeral Codex specialist in a read-only sandbox. |
+| `computer` | `computer-native` | Operates native Mac applications through a bounded observe, act, wait, and verify loop. |
 | `music` | `spotify-web-api` | Connects Spotify and controls playback, tracks, playlists, queue, shuffle, repeat, and volume. |
 
 The broker filters providers by capability and permission, checks availability, then ranks them by priority, reliability, and latency.
@@ -420,6 +428,13 @@ Configured command providers are trusted local extensions.
 They can declare read-only or write capabilities and actions in the same configuration, so adding their routes does not require an agent code change.
 The built-in Spotify provider uses a locally enforced `low_risk_write` policy for playback controls.
 Requested writes execute immediately through bounded primitives.
+
+The computer provider keeps the complete user goal while it works.
+It refreshes Accessibility state after every meaningful action, rejects stale element references, waits for application launches, and verifies the resulting UI before finishing.
+Common goals such as `open Minecraft and press Play` use a deterministic generic open-and-press path without a planning-model call.
+Unfamiliar goals use the configured computer model to choose one bounded next action at a time.
+If a requested control is not exposed through Accessibility, the provider can locate that one control in the current active-window image and click the grounded point.
+The provider does not contain Minecraft-specific or other app-specific command branches.
 
 ## Primitive System
 
@@ -485,6 +500,8 @@ Current primitive kernel:
 | `mute_audio` | `low_risk_write` | Mutes or unmutes the default Core Audio output device. |
 | `inspect_ui` | `read_only` | Discovers the accessible controls in any running Mac application. |
 | `interact_ui` | `low_risk_write` | Performs a discovered Accessibility action immediately. |
+| `input_control` | `low_risk_write` | Sends bounded mouse, keyboard, text, or scroll input as a UI fallback. |
+| `locate_ui` | `read_only` | Locates one requested visible control in the active-window image when Accessibility cannot expose it. |
 
 Requested actions execute immediately without a second confirmation turn.
 Tool responses are bounded below LiveKit's RPC payload limit.
@@ -606,7 +623,14 @@ Optional:
 | `FRIDAY_ALLOWED_PATHS` | empty | Extra allowed file roots separated by the platform path separator. |
 | `FRIDAY_CODE_AGENT` | auto-detected | Executable path or command name for the read-only coding specialist. |
 | `FRIDAY_CAPABILITY_PROVIDERS_JSON` | `[]` | JSON array of trusted external capability providers. |
-| `FRIDAY_VISION_MODEL` | `gpt-4.1-mini` | OpenAI model used only for visual screen questions. |
+| `FRIDAY_VISION_MODEL` | `gpt-5.4-mini` | Fast OpenAI model used first for visual screen questions and UI grounding. |
+| `FRIDAY_VISION_REASONING_EFFORT` | `none` | Reasoning effort used by the fast visual model. |
+| `FRIDAY_VISION_ESCALATION_MODEL` | `gpt-5.6-terra` | Stronger visual model used when grounding or verification is ambiguous or invalid. |
+| `FRIDAY_VISION_ESCALATION_REASONING_EFFORT` | `low` | Reasoning effort used by the stronger visual model. |
+| `FRIDAY_COMPUTER_MODEL` | `gpt-5.4-mini` | Fast OpenAI planner used first for unfamiliar multi-step computer-control goals. |
+| `FRIDAY_COMPUTER_REASONING_EFFORT` | `low` | Reasoning effort used by the fast computer-control planner. |
+| `FRIDAY_COMPUTER_ESCALATION_MODEL` | `gpt-5.6-terra` | Stronger planner used after failed steps, invalid output, or low-confidence decisions. |
+| `FRIDAY_COMPUTER_ESCALATION_REASONING_EFFORT` | `low` | Reasoning effort used by the stronger computer-control planner. |
 | `FRIDAY_CLOUD_VISUAL_ANALYSIS` | `true` | Disables sending active-window images to OpenAI when set to `false`; local Accessibility and OCR context remain available. |
 
 Spotify access and refresh tokens are stored in macOS Keychain under the service name `com.friday.spotify.oauth`.
@@ -852,6 +876,7 @@ Expected shape:
 - Calendar context is read-only and empty until the user grants full Calendar access.
 - The POC reference resolver supports explicit aliases plus current file, page, app, and project references, not a complete personal knowledge graph.
 - Some apps expose incomplete Accessibility trees, so AppleScript or a direct process command can be a fallback.
+- Browser pages still depend on the browser's Accessibility tree; a dedicated Arc extension is needed for reliable DOM-level page control.
 - Weather and other unsupported services use reusable web and app primitives until a dedicated provider is justified.
 
 ## Development Notes

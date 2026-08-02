@@ -255,6 +255,78 @@ actor LocalServiceClient {
         return object
     }
 
+    func locateVisualControl(
+        target: String,
+        imageData: Data,
+        mimeType: String,
+        ocrText: String,
+        metadata: [String: Any]
+    ) async throws -> [String: Any] {
+        var req = URLRequest(
+            url: baseURL.appendingPathComponent("perception/locate")
+        )
+        req.httpMethod = "POST"
+        req.timeoutInterval = 25
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "target": target,
+                "imageBase64": imageData.base64EncodedString(),
+                "mimeType": mimeType,
+                "ocrText": ocrText,
+                "metadata": metadata,
+            ]
+        )
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            throw NSError(
+                domain: "Friday",
+                code: 16,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "visual control location failed"
+                ]
+            )
+        }
+        return object
+    }
+
+    func verifyVisualAction(
+        target: String,
+        beforeImageData: Data,
+        afterImageData: Data,
+        mimeType: String
+    ) async throws -> [String: Any] {
+        var req = URLRequest(
+            url: baseURL.appendingPathComponent("perception/verify-action")
+        )
+        req.httpMethod = "POST"
+        req.timeoutInterval = 25
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "target": target,
+                "beforeImageBase64": beforeImageData.base64EncodedString(),
+                "afterImageBase64": afterImageData.base64EncodedString(),
+                "mimeType": mimeType,
+            ]
+        )
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            throw NSError(
+                domain: "Friday",
+                code: 17,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "visual action verification failed"
+                ]
+            )
+        }
+        return object
+    }
+
     func resumeWake() async throws {
         var req = URLRequest(url: baseURL.appendingPathComponent("wake/resume"))
         req.httpMethod = "POST"
@@ -270,8 +342,11 @@ actor LocalServiceClient {
 
     /// Long-lived WebSocket; emits raw JSON event text via the callback.
     /// The returned Task should be cancelled to disconnect.
-    nonisolated func openEventStream(onEventJSON: @escaping @Sendable (String) -> Void,
-                                     onError: @escaping @Sendable (Error) -> Void) -> Task<Void, Never> {
+    nonisolated func openEventStream(
+        onEventJSON: @escaping @Sendable (String) -> Void,
+        onNativeToolRequest: @escaping @Sendable (String) async -> String,
+        onError: @escaping @Sendable (Error) -> Void
+    ) -> Task<Void, Never> {
         let url = URL(string: "ws://127.0.0.1:\(baseURL.port ?? 0)/events")!
         return Task.detached {
             let cfg = URLSessionConfiguration.ephemeral
@@ -287,8 +362,36 @@ actor LocalServiceClient {
                     case .data(let d):   text = String(data: d, encoding: .utf8)
                     @unknown default:    text = nil
                     }
-                    if let t = text {
-                        onEventJSON(t)
+                    if let text,
+                       let data = text.data(using: .utf8),
+                       let object = try? JSONSerialization.jsonObject(with: data)
+                        as? [String: Any],
+                       object["type"] as? String == "native_tool_request",
+                       let requestID = object["requestId"] as? String {
+                        let resultJSON = await onNativeToolRequest(text)
+                        let resultData = resultJSON.data(using: .utf8)
+                        let result = resultData.flatMap {
+                            try? JSONSerialization.jsonObject(with: $0)
+                        } as? [String: Any] ?? [
+                            "ok": false,
+                            "error": "the native tool response was invalid",
+                        ]
+                        let response: [String: Any] = [
+                            "type": "native_tool_response",
+                            "requestId": requestID,
+                            "result": result,
+                        ]
+                        if let responseData = try? JSONSerialization.data(
+                            withJSONObject: response
+                        ),
+                           let responseText = String(
+                            data: responseData,
+                            encoding: .utf8
+                           ) {
+                            try await task.send(.string(responseText))
+                        }
+                    } else if let text {
+                        onEventJSON(text)
                     }
                 }
             } catch {
