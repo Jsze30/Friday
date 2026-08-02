@@ -11,7 +11,7 @@ final class HUDPanelController {
 
     init() {
         panel = HUDPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 110),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 150),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -50,7 +50,7 @@ final class HUDPanelController {
                 panel.orderFrontRegardless()
             }
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
+                context.duration = 0.12
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1
             }
@@ -59,10 +59,10 @@ final class HUDPanelController {
 
         hideTask?.cancel()
         hideTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
+            try? await Task.sleep(for: .milliseconds(620))
             guard let self, !Task.isCancelled else { return }
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.3
+                context.duration = 0.16
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 self.panel.animator().alphaValue = 0
             }, completionHandler: { [weak panel] in
@@ -74,9 +74,9 @@ final class HUDPanelController {
     private func resizeAndPosition(height: CGFloat) {
         let oldFrame = panel.frame
         let screen = activeScreen()
-        let width: CGFloat = 440
-        let x = screen.visibleFrame.midX - width / 2
-        let y = screen.visibleFrame.maxY - height - 16
+        let width: CGFloat = 380
+        let x = screen.visibleFrame.maxX - width - 16
+        let y = screen.visibleFrame.maxY - height - 10
         let frame = NSRect(x: x, y: y, width: width, height: height)
         if oldFrame.equalTo(frame) { return }
         panel.setFrame(frame, display: true, animate: panel.isVisible)

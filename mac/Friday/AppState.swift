@@ -48,13 +48,7 @@ final class AppState: ObservableObject {
     }
 
     var preferredHUDHeight: CGFloat {
-        var height: CGFloat = 82
-        if !userTranscript.isEmpty { height += 34 }
-        if !assistantTranscript.isEmpty { height += 44 }
-        if !references.isEmpty { height += 32 }
-        if !resultDetail.isEmpty { height += 28 }
-        if !latencyText.isEmpty { height += 20 }
-        return min(max(height, 96), 250)
+        150
     }
 
     func beginTurn() {
@@ -153,11 +147,11 @@ final class AppState: ObservableObject {
         beginTurn()
         set(.wakeDetected)
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(850))
             set(.listening)
             userTranscript = "Open that project and show me what changed"
             revision += 1
-            try? await Task.sleep(for: .milliseconds(900))
+            try? await Task.sleep(for: .milliseconds(1_800))
             set(.thinking)
             references = [
                 HUDReference(
@@ -169,16 +163,18 @@ final class AppState: ObservableObject {
             ]
             activityDetail = "that project means Friday"
             revision += 1
-            try? await Task.sleep(for: .milliseconds(750))
+            try? await Task.sleep(for: .milliseconds(1_800))
             set(.acting)
             activityDetail = "Opening the Friday project"
             revision += 1
-            try? await Task.sleep(for: .milliseconds(700))
+            try? await Task.sleep(for: .milliseconds(1_700))
             resultDetail = "Project opened"
             assistantTranscript = "I opened Friday and found three changed files."
             latencyText = "First response 812 ms"
             set(.speaking)
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(3.5))
+            set(.followupWindow)
+            try? await Task.sleep(for: .seconds(1.6))
             set(.sleeping)
         }
     }
