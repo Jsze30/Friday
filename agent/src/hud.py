@@ -23,6 +23,7 @@ class HudPublisher:
         self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
         self._task: asyncio.Task[None] | None = None
         self._turn_id: str | None = None
+        self._session_id = uuid.uuid4().hex
         self._turn_started_at: float | None = None
         self._destination_identity: str | None = None
 
@@ -48,6 +49,7 @@ class HudPublisher:
             "version": 1,
             "type": event_type,
             "timestamp": datetime.now(UTC).isoformat(),
+            "sessionId": self._session_id,
             "turnId": self._turn_id,
             **payload,
         }

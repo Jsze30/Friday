@@ -32,8 +32,17 @@ On startup the helper:
 - `POST /wake/pause` / `POST /wake/resume`
 - `POST /tools/execute` - executes a registered local primitive.
 - `POST /capabilities/execute` - lists, starts, polls, or cancels a capability.
-- `POST /context/resolve` - resolves working context and saved reference phrases.
+- `POST /context/resolve` - builds one size-bounded relevant context package.
 - `GET /context/references` - lists saved reference phrases.
+- `GET /context/status` - returns schema and memory counts.
+- `GET /context/memories` - lists or searches durable memories.
+- `DELETE /context/memories/{id}` - deletes one memory.
+- `GET /context/timeline` - searches timeline events.
+- `POST /context/events` - records final conversation and execution events.
+- `PUT /context/references` - creates or corrects a reference alias.
+- `PUT /context/preferences/{key}` - saves an explicit preference.
+- `POST /context/facts` - saves an explicit graph relationship.
+- `POST /context/retention/run` - compacts and expires old context.
 - `WS /wake/audio` - receives wake-word audio frames from Swift.
 - `WS /events` - emits events such as `wake_detected` and `profile_updated`.
 
@@ -47,7 +56,7 @@ src/
   config.py          pydantic-settings
   tokens.py          LiveKit AccessToken with agent dispatch
   wake.py            openWakeWord scoring for PCM supplied by Swift
-  context_store.py   SQLite reference memory and context resolution
+  context_store.py   SQLite timeline, graph, memory, retention, and retrieval
   capabilities/      capability broker, providers, and task runtime
   tools/             auto-loaded local primitive registry
   events.py          in-process pub/sub
@@ -57,3 +66,6 @@ src/
 scripts/
   wake_monitor.py    standalone microphone monitor for model tuning
 ```
+
+The context database uses versioned schemas, provenance on every durable fact, FTS5 retrieval, soft deletion, timeline compaction, and strict per-turn result budgets.
+Integration adapters can register sources and submit normalized entities, relationships, events, and preferences without changing agent routing.

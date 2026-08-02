@@ -16,7 +16,8 @@ struct HUDView: View {
             MagicRingsOrb(
                 state: model.state,
                 stateBeganAt: stateBeganAt,
-                revision: model.revision
+                revision: model.revision,
+                isActive: model.shouldShowHUD
             )
             .frame(width: 126, height: 126)
             .accessibilityHidden(true)
@@ -174,9 +175,10 @@ private struct MagicRingsOrb: View {
     let state: AssistantState
     let stateBeganAt: Date
     let revision: Int
+    let isActive: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isActive)) { context in
             Canvas(opaque: false, colorMode: .extendedLinear, rendersAsynchronously: true) { graphics, size in
                 drawRings(
                     in: &graphics,

@@ -5,8 +5,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hud: HUDPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-only; LSUIElement=true in Info.plist also enforces this.
-        NSApp.setActivationPolicy(.accessory)
+        // Friday remains available in both the Dock and menu bar.
+        NSApp.setActivationPolicy(.regular)
 
         menuBar = MenuBarController()
         hud = HUDPanelController()
@@ -22,6 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
                 AppState.shared.runHUDPreview()
+            }
+        }
+        if CommandLine.arguments.contains("--preview-memories") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                MemoryManagerController.shared.show()
             }
         }
     }

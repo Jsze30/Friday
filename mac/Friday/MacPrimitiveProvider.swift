@@ -381,6 +381,111 @@ final class MacPrimitiveProvider {
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
     }
 
+    func semanticContext(maxElements: Int = 80) -> [String: Any] {
+        guard AXIsProcessTrusted() else {
+            return ["available": false, "reason": "permission_required"]
+        }
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            return ["available": false, "reason": "no_frontmost_application"]
+        }
+
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        let focusedWindow = elementAttribute(
+            application,
+            kAXFocusedWindowAttribute
+        )
+        let root = focusedWindow ?? application
+        let boundedLimit = max(1, min(maxElements, 120))
+        var queue: [(AXUIElement, Int)] = [(root, 0)]
+        var queueIndex = 0
+        var visited = 0
+        var textParts: [String] = []
+        var seenText: Set<String> = []
+        var controls: [[String: Any]] = []
+        var selectedText = ""
+
+        while queueIndex < queue.count, visited < boundedLimit {
+            let (element, depth) = queue[queueIndex]
+            queueIndex += 1
+            visited += 1
+            if boolAttribute(element, kAXHiddenAttribute) == true {
+                continue
+            }
+
+            let role = stringAttribute(element, kAXRoleAttribute) ?? "unknown"
+            let subrole = stringAttribute(element, kAXSubroleAttribute) ?? ""
+            let secure = isSecureElement(role: role, subrole: subrole)
+            let title = stringAttribute(element, kAXTitleAttribute) ?? ""
+            let description = stringAttribute(element, kAXDescriptionAttribute) ?? ""
+            let value = secure
+                ? ""
+                : (stringAttribute(element, kAXValueAttribute) ?? "")
+            let selection = secure
+                ? ""
+                : (stringAttribute(element, kAXSelectedTextAttribute) ?? "")
+
+            if selectedText.isEmpty, !selection.isEmpty {
+                selectedText = selection
+            }
+            for text in [title, description, value] where !text.isEmpty {
+                let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty, !seenText.contains(normalized) else {
+                    continue
+                }
+                seenText.insert(normalized)
+                textParts.append(normalized)
+            }
+
+            let actions = actionNames(element)
+            if !actions.isEmpty || Self.isControlRole(role) {
+                let label = [title, description]
+                    .first(where: { !$0.isEmpty }) ?? ""
+                if !label.isEmpty, controls.count < 16 {
+                    var control: [String: Any] = [
+                        "role": role,
+                        "label": label,
+                    ]
+                    if let enabled = boolAttribute(element, kAXEnabledAttribute) {
+                        control["enabled"] = enabled
+                    }
+                    if !actions.isEmpty {
+                        control["actions"] = Array(actions.prefix(4))
+                    }
+                    controls.append(control)
+                }
+            }
+
+            if depth < 12 {
+                for child in childrenOf(element) {
+                    queue.append((child, depth + 1))
+                }
+            }
+        }
+
+        var text = textParts.joined(separator: "\n")
+        if text.count > 2_500 {
+            text = String(text.prefix(2_500))
+        }
+        var result: [String: Any] = [
+            "available": true,
+            "app": app.localizedName ?? app.bundleIdentifier ?? "Unknown",
+            "bundleId": app.bundleIdentifier ?? "",
+            "visibleText": text,
+            "controls": controls,
+            "elementsVisited": visited,
+            "truncated": queueIndex < queue.count,
+        ]
+        if !selectedText.isEmpty {
+            result["selectedText"] = selectedText
+        }
+        if let focusedWindow,
+           let windowTitle = stringAttribute(focusedWindow, kAXTitleAttribute),
+           !windowTitle.isEmpty {
+            result["windowTitle"] = windowTitle
+        }
+        return result
+    }
+
     func execute(jsonPayload: String) async -> String {
         guard let payload = decodeObject(jsonPayload),
               let tool = payload["tool"] as? String else {
@@ -1009,7 +1114,16 @@ final class MacPrimitiveProvider {
                 attribute: kAXDescriptionAttribute,
                 to: &item
             )
-            addAttribute("value", from: element, attribute: kAXValueAttribute, to: &item)
+            let role = item["role"] as? String ?? ""
+            let subrole = item["subrole"] as? String ?? ""
+            if !isSecureElement(role: role, subrole: subrole) {
+                addAttribute(
+                    "value",
+                    from: element,
+                    attribute: kAXValueAttribute,
+                    to: &item
+                )
+            }
             addAttribute(
                 "identifier",
                 from: element,
@@ -1257,6 +1371,37 @@ final class MacPrimitiveProvider {
             return flattened
         }
         return String(flattened.prefix(160)) + "..."
+    }
+
+    private func elementAttribute(
+        _ element: AXUIElement,
+        _ name: String
+    ) -> AXUIElement? {
+        guard let value = attribute(element, name),
+              CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    private func isSecureElement(role: String, subrole: String) -> Bool {
+        role.caseInsensitiveCompare("AXSecureTextField") == .orderedSame
+            || subrole.caseInsensitiveCompare("AXSecureTextField") == .orderedSame
+    }
+
+    private static func isControlRole(_ role: String) -> Bool {
+        [
+            "AXButton",
+            "AXCheckBox",
+            "AXComboBox",
+            "AXLink",
+            "AXMenuItem",
+            "AXPopUpButton",
+            "AXRadioButton",
+            "AXSlider",
+            "AXTabGroup",
+            "AXTextField",
+        ].contains(role)
     }
 
     private func boolAttribute(

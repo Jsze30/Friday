@@ -8,7 +8,8 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from . import capabilities, runtime, tools
+from . import capabilities, profile, runtime, tools
+from .context_store import store as context_store
 from .logging_setup import setup_logging
 from .routes import router
 from .wake import WakeDetector
@@ -22,6 +23,8 @@ PORT_FILE = Path.home() / "Library" / "Application Support" / "Friday" / "port"
 async def lifespan(app: FastAPI):
     tools.load_all()
     capabilities.load_all()
+    context_store.import_profile(profile.load())
+    context_store.run_retention()
     runtime.detector = WakeDetector()
     port = getattr(app.state, "bound_port", None)
     if port is not None:

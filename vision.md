@@ -107,6 +107,58 @@ Working context enables requests such as:
 
 This snapshot should be available locally without a network or model round trip.
 
+### Computer perception
+
+Friday cannot understand what Jason is doing from app names and window titles alone.
+It needs a computer perception layer that can understand both the semantic structure and the visible appearance of the current workspace.
+
+Computer perception should combine three levels of awareness:
+
+| Level | Source | What it provides |
+| --- | --- | --- |
+| Ambient awareness | macOS workspace events and app adapters | Active app, window, document, browser page, project, media, and recent activity. |
+| Semantic awareness | Accessibility APIs, browser interfaces, and app extensions | Visible text, selected content, focused controls, buttons, links, editor state, and UI structure. |
+| Visual awareness | Active-window capture, local OCR, and selective vision-model analysis | Layout, images, charts, errors, unsupported interfaces, and anything that cannot be understood through structured data. |
+
+Friday should prefer structured app data and Accessibility information because they are faster, more precise, and less expensive than interpreting pixels.
+Screen capture should fill the gaps rather than replace reliable app integrations.
+
+The default perception flow should be:
+
+```text
+App, window, selection, or page changes
+                  |
+                  v
+       Refresh structured local context
+                  |
+                  v
+   Capture the active window when useful
+                  |
+                  v
+      Deduplicate and run local OCR
+                  |
+                  v
+Use a vision model only when visual reasoning is needed
+```
+
+Friday should keep a recent local snapshot of the active workspace so questions such as "what does this mean?" do not begin with a slow discovery process.
+It should refresh that snapshot when the focused app, window, page, document, or selection changes and immediately before a context-dependent request when the snapshot may be stale.
+
+Friday should not continuously stream or analyze the entire display.
+It should capture the active window by default, ignore unchanged frames, crop to the relevant region when possible, and retain raw images only briefly unless Jason explicitly saves one.
+
+This layer enables requests such as:
+
+- "Explain what I am looking at."
+- "What is wrong with this layout?"
+- "Fix this error."
+- "Click the download button."
+- "Open the page I was just reading."
+- "Continue what I was doing."
+
+Visual understanding and visual control are separate responsibilities.
+Perception determines what is present and what Jason means, while the action system still prefers APIs, extensions, commands, and Accessibility controls before coordinate-based clicking.
+
 ### Personal timeline
 
 The timeline records meaningful events rather than every raw interaction.
@@ -294,6 +346,26 @@ Target budgets:
 | Acknowledge a longer capability | Under 500ms |
 | First spoken reply after a simple question | Under 1s after end of speech |
 
+### Resource efficiency
+
+Continuous context must not make the Mac feel slower, drain the battery, or keep the system hot.
+Naively recording the display, running OCR on every frame, or sending continuous images to a vision model would create unacceptable CPU, memory, network, and energy usage.
+
+Friday should therefore be event-driven rather than video-driven.
+
+- Observe app, window, document, selection, and browser events instead of polling whenever possible.
+- Coalesce rapid changes and process only the newest relevant state.
+- Hash or compare captures so unchanged content is not analyzed again.
+- Run OCR only on new or relevant regions.
+- Use vision models only for requests or events that require visual interpretation.
+- Lower observation frequency on battery power, under thermal pressure, or while resource-intensive apps are active.
+- Move expensive indexing and memory compaction to low-priority background work.
+- Apply backpressure so perception work cannot build an unbounded queue.
+
+The idle target should be effectively unnoticeable, with no continuous screen encoding and approximately one percent or less average CPU usage on a typical supported Mac.
+Short bursts of higher CPU usage are acceptable when Jason asks Friday to inspect the screen, provided the work stops promptly afterward.
+CPU, memory, energy impact, capture frequency, OCR time, and dropped perception events should be included in local diagnostics.
+
 ### Required interaction behavior
 
 - Jason can say "Friday, what is the weather?" continuously without pausing after the wake phrase.
@@ -345,6 +417,8 @@ The desired rules are:
 - Support viewing, correcting, exporting, and deleting memories.
 - Use retention rules so low-value activity does not accumulate forever.
 - Avoid storing raw microphone audio as personal memory.
+- Keep screen captures local by default, capture only the relevant display or window, and retain raw captures briefly.
+- Make screen and Accessibility access visible, understandable, and independently controllable.
 - Send only the context needed for the current request to cloud models.
 - Keep the cloud agent behind the existing LiveKit RPC boundary rather than exposing the Mac directly.
 
@@ -494,17 +568,22 @@ This phase should begin before the personal context work because the HUD makes e
 - Add reference resolution for recently mentioned people, projects, files, events, and apps.
 - Feed action and capability results back into the timeline.
 
-### Phase 2: High-value life integrations
+### Phase 2: Computer perception
+
+- Add event-driven current-app, window, document, and selection tracking through macOS workspace and Accessibility APIs.
+- Add active-window capture with freshness metadata, deduplication, cropping, and short retention.
+- Add local OCR and a structured representation of visible text and controls.
+- Add selective vision-model analysis for layouts, images, charts, errors, and unsupported interfaces.
+- Add Arc page and tab context through the strongest available browser interface.
+- Add VS Code workspace, file, selection, diagnostics, terminal, and task context through an extension or agent protocol.
+- Feed perception changes into working context and reference resolution.
+- Measure and enforce idle CPU, memory, battery, thermal, and capture-frequency budgets.
+
+### Phase 3: High-value life integrations
 
 - Add Calendar, Reminders, Contacts, and Notes adapters.
 - Publish their actions through the existing action catalog.
 - Normalize their people, tasks, events, notes, locations, and relationships into the context engine.
-
-### Phase 3: Computer awareness
-
-- Add current Mac app, window, selection, and recent-file context.
-- Add Arc page and tab context through the strongest available browser interface.
-- Add VS Code workspace, file, selection, diagnostics, terminal, and task context through an extension or agent protocol.
 
 ### Phase 4: Timeline and knowledge graph
 
@@ -549,6 +628,7 @@ Friday is approaching the vision when:
 - The HUD shows what Friday heard, what it is doing, what it answered, and what structured result it produced.
 - Jason can speak naturally without translating requests into tool names.
 - Friday correctly resolves common references from current and recent context.
+- Friday can explain the active workspace using app data, Accessibility information, and selective visual analysis without continuously streaming the screen.
 - Friday can recall important events, decisions, files, people, and commitments across sessions.
 - Corrections improve future behavior and remain visible and editable.
 - New integrations enrich existing capabilities without central router changes.
@@ -556,6 +636,7 @@ Friday is approaching the vision when:
 - UI automation is a fallback rather than the foundation.
 - Friday explains uncertainty instead of inventing memories or relationships.
 - Personal context remains local-first and controllable.
+- Idle perception remains effectively unnoticeable in CPU, memory, battery, and thermal impact.
 - Friday provides useful help before being explicitly instructed, without becoming distracting.
 
 ---

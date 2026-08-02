@@ -94,13 +94,24 @@ actor LocalServiceClient {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    func resolveContext(query: String, working: [String: Any]) async throws -> String {
+    func resolveContext(
+        query: String,
+        working: [String: Any],
+        sessionId: String? = nil,
+        maxCharacters: Int = 8_000
+    ) async throws -> String {
         var req = URLRequest(url: baseURL.appendingPathComponent("context/resolve"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(
-            withJSONObject: ["query": query, "working": working]
-        )
+        var body: [String: Any] = [
+            "query": query,
+            "working": working,
+            "maxCharacters": maxCharacters,
+        ]
+        if let sessionId, !sessionId.isEmpty {
+            body["sessionId"] = sessionId
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw NSError(
@@ -110,6 +121,138 @@ actor LocalServiceClient {
             )
         }
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    func recordContextEvent(_ event: [String: Any]) async throws {
+        var req = URLRequest(url: baseURL.appendingPathComponent("context/events"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: event)
+        let (_, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 10,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "context event write failed"
+                ]
+            )
+        }
+    }
+
+    func contextMemories(
+        kind: String? = nil,
+        query: String = ""
+    ) async throws -> [[String: Any]] {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("context/memories"),
+            resolvingAgainstBaseURL: false
+        )!
+        var items: [URLQueryItem] = []
+        if let kind, !kind.isEmpty, kind != "all" {
+            items.append(URLQueryItem(name: "kind", value: kind))
+        }
+        if !query.isEmpty {
+            items.append(URLQueryItem(name: "query", value: query))
+        }
+        components.queryItems = items.isEmpty ? nil : items
+        let (data, resp) = try await session.data(from: components.url!)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let payload = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let memories = payload["memories"] as? [[String: Any]] else {
+            throw NSError(
+                domain: "Friday",
+                code: 13,
+                userInfo: [NSLocalizedDescriptionKey: "memory fetch failed"]
+            )
+        }
+        return memories
+    }
+
+    func rememberReference(
+        alias: String,
+        target: String,
+        kind: String
+    ) async throws {
+        var req = URLRequest(url: baseURL.appendingPathComponent("context/references"))
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(
+            withJSONObject: ["alias": alias, "target": target, "kind": kind]
+        )
+        let (_, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 14,
+                userInfo: [NSLocalizedDescriptionKey: "memory write failed"]
+            )
+        }
+    }
+
+    func forgetContextMemory(id: String) async throws {
+        let url = baseURL
+            .appendingPathComponent("context/memories")
+            .appendingPathComponent(id)
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let payload = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              payload["forgotten"] as? Bool == true else {
+            throw NSError(
+                domain: "Friday",
+                code: 15,
+                userInfo: [NSLocalizedDescriptionKey: "memory deletion failed"]
+            )
+        }
+    }
+
+    func analyzeVisualContext(
+        query: String,
+        imageData: Data,
+        mimeType: String,
+        ocrText: String,
+        metadata: [String: Any]
+    ) async throws -> [String: Any] {
+        var req = URLRequest(
+            url: baseURL.appendingPathComponent("perception/analyze")
+        )
+        req.httpMethod = "POST"
+        req.timeoutInterval = 25
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(
+            withJSONObject: [
+                "query": query,
+                "imageBase64": imageData.base64EncodedString(),
+                "mimeType": mimeType,
+                "ocrText": ocrText,
+                "metadata": metadata,
+            ]
+        )
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 11,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "visual analysis failed"
+                ]
+            )
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            throw NSError(
+                domain: "Friday",
+                code: 12,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "visual analysis response was invalid"
+                ]
+            )
+        }
+        return object
     }
 
     func resumeWake() async throws {

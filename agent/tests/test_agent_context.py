@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 
 from livekit.agents import function_tool, llm
@@ -8,6 +9,8 @@ from livekit.agents import function_tool, llm
 from action_catalog import ActionCatalog
 from agent import (
     BASE_INSTRUCTIONS,
+    MAX_CHAT_ITEMS,
+    MAX_TURN_CONTEXT_CHARACTERS,
     FridayAgent,
     matching_route_tools,
     render_instructions,
@@ -122,6 +125,35 @@ class AgentContextTests(unittest.TestCase):
             "Visual Studio Code",
         )
 
+    def test_visual_question_receives_computer_perception_context(self) -> None:
+        async def context_provider(_query: str) -> dict:
+            return {
+                "workingContext": {
+                    "computerPerception": {
+                        "visualAnalysis": {
+                            "ok": True,
+                            "analysis": "The chart has an unlabeled vertical axis.",
+                        }
+                    }
+                },
+                "resolutions": [],
+            }
+
+        agent = object.__new__(FridayAgent)
+        agent._turn_context_provider = context_provider
+        agent._hud_event_sink = None
+        agent._current_turn_context = {}
+        turn_context = llm.ChatContext()
+        message = llm.ChatMessage(
+            role="user",
+            content=["What looks wrong with this chart?"],
+        )
+
+        asyncio.run(agent.on_user_turn_completed(turn_context, message))
+
+        self.assertEqual(len(turn_context.items), 1)
+        self.assertIn("unlabeled vertical axis", turn_context.items[0].text_content)
+
     def test_resolved_reference_bypasses_the_raw_deterministic_route(self) -> None:
         agent = object.__new__(FridayAgent)
         agent._action_catalog = ActionCatalog(
@@ -202,6 +234,37 @@ class AgentContextTests(unittest.TestCase):
         route = agent._deterministic_route_for_turn(chat_context)
 
         self.assertEqual(route.arguments["action"], "context.remember_reference")
+
+    def test_long_sessions_keep_only_a_bounded_recent_chat_history(self) -> None:
+        agent = object.__new__(FridayAgent)
+        agent._turn_context_provider = None
+        agent._hud_event_sink = None
+        agent._current_turn_context = {}
+        agent._chat_ctx = llm.ChatContext()
+        turn_context = llm.ChatContext()
+        for index in range(MAX_CHAT_ITEMS + 30):
+            role = "user" if index % 2 == 0 else "assistant"
+            agent._chat_ctx.add_message(role=role, content=f"stored {index}")
+            turn_context.add_message(role=role, content=f"turn {index}")
+        message = llm.ChatMessage(role="user", content=["Continue"])
+
+        asyncio.run(agent.on_user_turn_completed(turn_context, message))
+
+        self.assertLessEqual(len(agent._chat_ctx.items), MAX_CHAT_ITEMS)
+        self.assertLessEqual(len(turn_context.items), MAX_CHAT_ITEMS)
+        self.assertIn("stored 77", agent._chat_ctx.items[-1].text_content)
+
+    def test_turn_context_json_is_valid_and_bounded(self) -> None:
+        context = {
+            "workingContext": {"computerPerception": {"visibleText": "x" * 20_000}},
+            "timeline": [{"summary": "y" * 2_000} for _ in range(20)],
+            "retrievedMemories": [{"name": "z" * 2_000} for _ in range(20)],
+        }
+
+        encoded = FridayAgent._bounded_context_json(context)
+
+        self.assertLessEqual(len(encoded), MAX_TURN_CONTEXT_CHARACTERS)
+        self.assertIsInstance(json.loads(encoded), dict)
 
 
 if __name__ == "__main__":

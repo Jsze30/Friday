@@ -93,6 +93,136 @@ async def list_reference_memories() -> ToolResult:
 
 
 @tool(
+    name="remember_fact",
+    description=(
+        "Store one explicit durable relationship the user asked Friday to "
+        "remember. Do not use this for guesses or incidental conversation."
+    ),
+    permission="low_risk_write",
+    parameters=[
+        ToolParam("subject", "string", "The entity the fact is about."),
+        ToolParam("predicate", "string", "The relationship, such as works_on or knows."),
+        ToolParam("object", "string", "The related entity."),
+        ToolParam("subject_kind", "string", "Optional subject kind.", required=False),
+        ToolParam("object_kind", "string", "Optional object kind.", required=False),
+    ],
+)
+async def remember_fact(
+    subject: str,
+    predicate: str,
+    object: str,
+    subject_kind: str | None = None,
+    object_kind: str | None = None,
+) -> ToolResult:
+    relationship = store.remember_fact(
+        subject,
+        predicate,
+        object,
+        subject_kind=subject_kind or "entity",
+        object_kind=object_kind or "entity",
+    )
+    return ToolResult(
+        spoken=f"I will remember that {subject} {predicate.replace('_', ' ')} {object}.",
+        data={"memory": relationship},
+    )
+
+
+@tool(
+    name="remember_preference",
+    description=(
+        "Store a preference only when the user explicitly asks Friday to "
+        "remember or consistently use it."
+    ),
+    permission="low_risk_write",
+    parameters=[
+        ToolParam("key", "string", "A stable preference key."),
+        ToolParam("value", "string", "The preferred value."),
+    ],
+)
+async def remember_preference(key: str, value: str) -> ToolResult:
+    memory = store.set_preference(key, value)
+    return ToolResult(
+        spoken=f"I will remember your {key.replace('_', ' ')} preference.",
+        data={"memory": memory},
+    )
+
+
+@tool(
+    name="list_memories",
+    description=(
+        "Inspect Friday's durable memories, including references, preferences, "
+        "entities, and relationships."
+    ),
+    permission="read_only",
+    parameters=[
+        ToolParam(
+            "kind",
+            "string",
+            "Optional reference, preference, entity, or relationship filter.",
+            required=False,
+        ),
+        ToolParam("query", "string", "Optional text filter.", required=False),
+    ],
+)
+async def list_memories(
+    kind: str | None = None,
+    query: str | None = None,
+) -> ToolResult:
+    memories = store.list_memories(kind=kind, query=query or "", limit=100)
+    return ToolResult(
+        spoken=f"I found {len(memories)} memories.",
+        data={"memories": memories},
+    )
+
+
+@tool(
+    name="forget_memory",
+    description="Delete one durable memory by the ID returned from list_memories.",
+    permission="low_risk_write",
+    parameters=[ToolParam("memory_id", "string", "The exact memory ID to delete.")],
+)
+async def forget_memory(memory_id: str) -> ToolResult:
+    removed = store.forget_memory(memory_id)
+    return ToolResult(
+        spoken="I forgot that memory." if removed else "I could not find that memory.",
+        data={"memoryId": memory_id, "forgotten": removed},
+    )
+
+
+@tool(
+    name="forget_latest_memory",
+    description=(
+        "Forget the most recent explicit reference, preference, or fact the user "
+        "asked Friday to remember. Use for 'forget that' or 'do not remember that'."
+    ),
+    permission="low_risk_write",
+    actions=[
+        {
+            "id": "context.forget_latest_memory",
+            "description": "Forget the last explicit memory Friday saved.",
+            "parameters": [],
+            "routes": [
+                {
+                    "pattern": (
+                        r"(?:do\s+not|don't)\s+remember\s+that|"
+                        r"forget\s+that"
+                    )
+                }
+            ],
+            "latencyMs": 20,
+            "priority": 190,
+        }
+    ],
+)
+async def forget_latest_memory() -> ToolResult:
+    memory = store.forget_latest_explicit_memory()
+    return ToolResult(
+        spoken="I forgot it." if memory else "There was no recent explicit memory to forget.",
+        data={"memory": memory, "forgotten": memory is not None},
+    )
+
+
+@tool(
     name="forget_reference",
     description="Forget one saved personal reference phrase.",
     permission="low_risk_write",

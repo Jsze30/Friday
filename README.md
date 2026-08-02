@@ -1,14 +1,11 @@
 # Friday
 
-Friday is a personal voice assistant for macOS. It runs as a menu bar app, wakes
-on a local wake word, joins a LiveKit Cloud room, and talks through a deployed
-LiveKit agent that uses speech-to-text, an LLM, text-to-speech, and a local tool
-registry.
+Friday is a personal voice assistant for macOS.
+It runs as a Dock and menu bar app, wakes on a local wake word, joins a LiveKit Cloud room, and talks through a deployed LiveKit agent that uses speech-to-text, an LLM, text-to-speech, and a local tool registry.
 
-The important design choice is that the cloud agent never connects directly to
-the user's machine. Local capabilities stay on the Mac. The cloud agent can only
-reach them through LiveKit RPC calls that are brokered by the Swift app and
-served by a localhost-only Python service.
+The important design choice is that the cloud agent never connects directly to the user's machine.
+Local capabilities stay on the Mac.
+The cloud agent can only reach them through LiveKit RPC calls that are brokered by the Swift app and served by a localhost-only Python service.
 
 ## What It Does
 
@@ -27,6 +24,8 @@ served by a localhost-only Python service.
 - Stores stable profile facts locally and injects them into the agent prompt.
 - Shows a non-activating HUD with live user text, streamed Friday text, state, resolved references, action progress, and end-to-end latency.
 - Reads a small local working-context snapshot containing the frontmost app, focused window or document, active URL when available, and upcoming calendar events.
+- Maintains an event-driven computer-perception cache containing accessible text, selected content, controls, and a short-lived active-window image.
+- Runs OCR locally with Apple Vision and sends one compressed active-window image to OpenAI only for questions that require visual reasoning.
 - Stores explicit reference memories such as "the project means Friday" in a local SQLite database.
 - Returns to sleep after the agent answers and a short follow-up window expires.
 
@@ -54,7 +53,7 @@ served by a localhost-only Python service.
 |   |-- pyproject.toml
 |   `-- uv.lock
 |
-|-- mac/                   # macOS menu bar app, Swift
+|-- mac/                   # macOS Dock and menu bar app, Swift
 |   |-- project.yml        # XcodeGen source of truth
 |   `-- Friday/            # App sources
 |
@@ -68,11 +67,11 @@ Generated and local-only directories such as `mac/build/`, Python virtualenvs, a
 
 ## Components
 
-### `mac/`: Menu Bar App
+### `mac/`: Dock and Menu Bar App
 
-The macOS app is the user-facing process. It is built from `mac/project.yml`
-with XcodeGen and targets macOS 14 or newer. It is configured as a menu-bar-only
-app (`LSUIElement=true`) and uses the LiveKit Swift SDK 2.x.
+The macOS app is the user-facing process.
+It is built from `mac/project.yml` with XcodeGen and targets macOS 14 or newer.
+It is configured as a regular Dock app that also provides a persistent menu-bar control, and it uses the LiveKit Swift SDK 2.x.
 
 Main files:
 
@@ -85,6 +84,7 @@ Main files:
 - `mac/Friday/HUDPanelController.swift` owns the non-activating floating panel and its lifecycle.
 - `mac/Friday/HUDView.swift` renders the compact animated conversation surface.
 - `mac/Friday/WorkingContextProvider.swift` captures the active app, focused window, document, URL, and calendar context.
+- `mac/Friday/ComputerPerceptionProvider.swift` observes app and Accessibility focus changes, captures the active window with ScreenCaptureKit, runs local OCR, deduplicates images, and requests selective visual analysis.
 - `mac/Friday/CalendarContextProvider.swift` reads the next 24 hours of calendar events when permission is granted.
 - `mac/Friday/BootCoordinator.swift` owns startup orchestration.
 - `mac/Friday/LocalServiceProcess.swift` launches `local_service` as a child
@@ -130,8 +130,18 @@ Local service API:
 | `PUT /profile` | Replaces/saves the local profile and emits `profile_updated`. |
 | `POST /tools/execute` | Executes a tool by name with JSON arguments. |
 | `POST /capabilities/execute` | Lists, starts, polls, or cancels a capability task. |
-| `POST /context/resolve` | Combines the current Mac snapshot with relevant saved reference memories. |
+| `POST /context/resolve` | Builds one bounded context package from working state, memories, preferences, and timeline events. |
 | `GET /context/references` | Lists saved reference memories. |
+| `GET /context/status` | Returns context schema, storage, and memory counts. |
+| `GET /context/memories` | Lists and searches durable entities, relationships, references, and preferences. |
+| `DELETE /context/memories/{id}` | Deletes one memory and invalidates dependent relationships when necessary. |
+| `GET /context/timeline` | Searches meaningful local timeline events. |
+| `POST /context/events` | Records final conversation, action, and capability events. |
+| `PUT /context/references` | Creates or corrects one reference alias. |
+| `PUT /context/preferences/{key}` | Stores one explicit preference. |
+| `POST /context/facts` | Stores one explicit entity relationship with provenance. |
+| `POST /context/retention/run` | Runs timeline compaction, expiration, and deletion cleanup. |
+| `POST /perception/analyze` | Sends one bounded active-window image to the configured OpenAI vision model when visual reasoning is required. |
 | `WS /events` | Streams local events such as `wake_detected` and `profile_updated`. |
 
 ### `agent/`: LiveKit Cloud Agent
@@ -264,10 +274,10 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 22. After speaking, the agent enters a 5 second follow-up window.
 23. If no follow-up input arrives, the agent disables its audio gate, calls `return_to_sleep`, and the HUD fades away.
 
-## HUD And Personal Context Proof Of Concept
+## HUD And Personal Context
 
-The proof of concept is one vertical slice across the Mac app, local service, and cloud agent.
-It is intentionally smaller than the full personal context vision.
+The personal context system is a local-first vertical slice across the Mac app, local service, and cloud agent.
+Future app integrations can publish normalized observations without changing retrieval or agent routing.
 
 The HUD is a 440-point non-activating panel positioned below the menu bar on the display containing the pointer.
 It remains hidden while Friday sleeps, appears on wake, never becomes the key window, ignores pointer events, and fades after the follow-up window.
@@ -282,11 +292,31 @@ The working-context snapshot currently contains:
 - Up to five calendar events in the next 24 hours when Calendar access is granted.
 - A project inferred from the current document's nearest Git repository.
 - Explicit saved reference memories retrieved from local SQLite.
+- Accessible text, selected text, and a bounded list of controls from the active window.
+- Local OCR text from the most recent changed active-window capture.
+- Selective visual analysis for screen, image, chart, layout, and similar visual questions.
+
+Computer perception is event-driven rather than a continuous video stream.
+Friday refreshes structured context after app and focus changes, captures on meaningful window changes, ignores duplicate images, and refreshes immediately before a visual request when needed.
+The raw image stays in memory and is not written to disk.
+Password managers and Keychain Access are excluded from capture and cloud analysis.
+Background capture is deferred in Low Power Mode or under serious thermal pressure, while an explicit visual request can still capture the active window.
 
 Saved aliases are generic rather than app-specific.
 For example, saying `Friday, when I say the project, I mean Friday` stores the mapping through the deterministic `context.remember_reference` action.
 Later uses of `the project` retrieve that saved meaning before the model answers.
 An explicit saved mapping wins over a conflicting live project guess.
+
+The durable SQLite store contains typed entities, relationships, aliases, preferences, mentions, provenance sources, corrections, and timeline events.
+Final conversation turns and completed actions flow back into the timeline through the HUD event stream.
+Repeated working snapshots are deduplicated, low-value activity expires, and old conversation turns are compacted into short searchable topic summaries.
+
+Each model turn receives at most 8,000 characters of retrieved context.
+The retrieved system message exists only in the temporary context for that inference and is not appended to future turns.
+The agent retains at most 48 recent chat items, while older useful information remains available through timeline retrieval.
+
+Choose `Memories…` from Friday's menu bar to inspect or delete durable memories and to create or correct a reference alias.
+Friday can be quit with Command-Q, from its Dock menu, from the standard application menu, or from its menu-bar control.
 
 To preview the HUD without speaking, open Friday's menu bar menu and choose `Preview HUD`.
 The preview walks through listening, context resolution, acting, speaking, and latency states without running a real action.
@@ -511,6 +541,15 @@ Profile writes emit a `profile_updated` event over `WS /events`.
 Swift forwards that event to the agent with the `profile_updated` RPC, and the agent rebuilds its instructions with the current facts.
 Legacy saved location keys are excluded because live Core Location is authoritative.
 
+The context database is stored at:
+
+```text
+~/Library/Application Support/Friday/context.sqlite3
+```
+
+Profile facts are mirrored into typed preferences with `profile` provenance.
+Explicit facts, aliases, preferences, corrections, timeline events, and graph relationships remain local and independently deletable.
+
 ## Configuration
 
 ### Agent Configuration
@@ -535,6 +574,8 @@ Optional:
 | Variable | Purpose |
 | --- | --- |
 | `FRIDAY_TEST_MODE=1` | In dev mode, greets on connect and leaves mic input enabled for smoke testing. |
+| `FRIDAY_MAX_CHAT_ITEMS` | Maximum recent LiveKit chat items kept in a session. Defaults to `48`. |
+| `FRIDAY_MAX_TURN_CONTEXT_CHARACTERS` | Maximum local context characters injected into one inference. Defaults to `8000`. |
 
 ### Local Service Configuration
 
@@ -553,6 +594,7 @@ Optional:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `OPENAI_API_KEY` | none | Enables selective cloud visual analysis in the local perception bridge. Local Accessibility and OCR continue without it. |
 | `SPOTIFY_CLIENT_ID` | none | Enables the Spotify provider using PKCE authentication. |
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:43821/spotify/callback` | Exact loopback callback registered in the Spotify dashboard. |
 | `FRIDAY_AGENT_NAME` | `friday-agent` | Agent dispatch name embedded in room tokens. |
@@ -564,6 +606,8 @@ Optional:
 | `FRIDAY_ALLOWED_PATHS` | empty | Extra allowed file roots separated by the platform path separator. |
 | `FRIDAY_CODE_AGENT` | auto-detected | Executable path or command name for the read-only coding specialist. |
 | `FRIDAY_CAPABILITY_PROVIDERS_JSON` | `[]` | JSON array of trusted external capability providers. |
+| `FRIDAY_VISION_MODEL` | `gpt-4.1-mini` | OpenAI model used only for visual screen questions. |
+| `FRIDAY_CLOUD_VISUAL_ANALYSIS` | `true` | Disables sending active-window images to OpenAI when set to `false`; local Accessibility and OCR context remain available. |
 
 Spotify access and refresh tokens are stored in macOS Keychain under the service name `com.friday.spotify.oauth`.
 The Spotify Client Secret is not used.
@@ -587,6 +631,7 @@ Prerequisites:
 - A microphone and macOS microphone permission for the menu bar app.
 - macOS location permission for location-aware requests.
 - macOS Accessibility permission for working context and generic UI controls.
+- macOS Screen Recording permission for active-window capture and local OCR.
 - Optional macOS Calendar permission for upcoming-event context.
 
 Install the local service:
@@ -721,7 +766,7 @@ must reconnect to pick it up.
 | --- | --- |
 | `~/Library/Application Support/Friday/port` | Current local service port file. |
 | `~/Library/Application Support/Friday/profile.json` | Local profile facts. |
-| `~/Library/Application Support/Friday/context.sqlite3` | Durable personal reference memories. |
+| `~/Library/Application Support/Friday/context.sqlite3` | Durable timeline, entities, relationships, preferences, provenance, and corrections. |
 | `~/Library/Logs/Friday/local_service.log` | Rotating local service log. |
 | `~/Library/Logs/Friday/latency.jsonl` | Privacy-filtered per-turn HUD and latency timing events without transcript text. |
 | `mac/build/` | Xcode build output when using the documented build command. |

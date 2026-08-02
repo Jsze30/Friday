@@ -9,6 +9,10 @@ final class WorkingContextProvider {
     private init() {}
 
     func snapshot() -> [String: Any] {
+        basicSnapshot(includePerception: true)
+    }
+
+    func basicSnapshot(includePerception: Bool) -> [String: Any] {
         var result: [String: Any] = [
             "capturedAt": ISO8601DateFormatter().string(from: Date()),
         ]
@@ -27,6 +31,10 @@ final class WorkingContextProvider {
         let events = CalendarContextProvider.shared.upcomingEvents()
         if !events.isEmpty {
             result["upcomingCalendarEvents"] = events
+        }
+        if includePerception {
+            result["computerPerception"] = ComputerPerceptionProvider.shared
+                .cachedContext()
         }
         return result
     }

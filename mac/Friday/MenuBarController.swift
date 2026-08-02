@@ -31,6 +31,13 @@ final class MenuBarController {
         )
         preview.target = self
         menu.addItem(preview)
+        let memories = NSMenuItem(
+            title: "Memories…",
+            action: #selector(showMemories),
+            keyEquivalent: ""
+        )
+        memories.target = self
+        menu.addItem(memories)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Friday", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
@@ -64,5 +71,9 @@ final class MenuBarController {
 
     @objc private func previewHUD() {
         AppState.shared.runHUDPreview()
+    }
+
+    @objc private func showMemories() {
+        MemoryManagerController.shared.show()
     }
 }

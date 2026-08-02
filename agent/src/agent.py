@@ -46,7 +46,18 @@ LOCATION_PROFILE_KEYS = {
 CONTEXT_RELEVANCE_PATTERN = re.compile(
     r"\b(?:this|that|these|those|current|project|repo|repository|file|document|"
     r"page|website|site|tab|app|application|window|calendar|schedule|meeting|"
-    r"event|today|tomorrow|next|coming\s+up|working\s+on|doing\s+now)\b",
+    r"event|today|tomorrow|yesterday|recent|remember|recall|before|last|next|"
+    r"prefer|usually|coming\s+up|working\s+on|doing\s+now|"
+    r"screen|look(?:ing)?|see|visible|here|image|picture|chart|graph|design|"
+    r"layout|error|selected|button|control|icon)\b",
+    re.IGNORECASE,
+)
+VISUAL_CONTEXT_PATTERN = re.compile(
+    r"\b(?:screen|screenshot|look(?:ing)?|see|visible|image|picture|chart|"
+    r"graph|design|layout|icon|button|visually)\b|"
+    r"\b(?:what(?:'s|\s+is)\s+wrong|what\s+is\s+happening)\s+here\b|"
+    r"\bwhat(?:'s|\s+is)\s+this\b|"
+    r"\b(?:explain|read)\s+this\s+error\b",
     re.IGNORECASE,
 )
 
@@ -58,6 +69,11 @@ AGENT_NAME = "friday-agent"
 FAST_MODEL = os.getenv("FRIDAY_FAST_MODEL", "gpt-4.1-nano")
 COMPLEX_MODEL = os.getenv("FRIDAY_COMPLEX_MODEL", "gpt-5.6-terra")
 COMPLEX_EFFORT = os.getenv("FRIDAY_COMPLEX_EFFORT", "low")
+MAX_CHAT_ITEMS = max(12, int(os.getenv("FRIDAY_MAX_CHAT_ITEMS", "48")))
+MAX_TURN_CONTEXT_CHARACTERS = max(
+    2_000,
+    int(os.getenv("FRIDAY_MAX_TURN_CONTEXT_CHARACTERS", "8000")),
+)
 
 BASE_INSTRUCTIONS = """You are Friday, a personal voice assistant on the user's Mac.
 Your name is Friday.
@@ -193,13 +209,24 @@ class FridayAgent(Agent):
         turn_ctx: llm.ChatContext,
         new_message: llm.ChatMessage,
     ) -> None:
+        # Keep a bounded recent transcript. Older useful turns are persisted
+        # in the local timeline and retrieved by relevance when needed.
+        turn_ctx.truncate(max_items=MAX_CHAT_ITEMS)
+        stored = getattr(self, "_chat_ctx", None)
+        if isinstance(stored, llm.ChatContext):
+            stored.truncate(max_items=MAX_CHAT_ITEMS)
         self._current_turn_context = {}
         if self._turn_context_provider is None or not new_message.text_content:
             return
+        context_timeout = (
+            9.0
+            if VISUAL_CONTEXT_PATTERN.search(new_message.text_content)
+            else 0.35
+        )
         try:
             context = await asyncio.wait_for(
                 self._turn_context_provider(new_message.text_content),
-                timeout=0.35,
+                timeout=context_timeout,
             )
         except TimeoutError:
             logger.warning("turn context timed out")
@@ -211,11 +238,12 @@ class FridayAgent(Agent):
             return
         self._current_turn_context = context
         if self._context_is_relevant(new_message.text_content, context):
+            encoded_context = self._bounded_context_json(context)
             turn_ctx.add_message(
                 role="system",
                 content=(
                     "<working_context>\n"
-                    + json.dumps(context, separators=(",", ":"))
+                    + encoded_context
                     + "\n</working_context>\n"
                     "Use this only for the current request. Prefer explicit saved "
                     "reference resolutions over guesses. If the context is still "
@@ -256,8 +284,54 @@ class FridayAgent(Agent):
 
     @staticmethod
     def _context_is_relevant(query: str, context: dict[str, Any]) -> bool:
-        return bool(context.get("resolutions")) or bool(
-            CONTEXT_RELEVANCE_PATTERN.search(query)
+        return bool(
+            context.get("resolutions")
+            or context.get("retrievedMemories")
+            or context.get("timeline")
+            or CONTEXT_RELEVANCE_PATTERN.search(query)
+        )
+
+    @staticmethod
+    def _bounded_context_json(context: dict[str, Any]) -> str:
+        encoded = json.dumps(context, separators=(",", ":"), ensure_ascii=False)
+        if len(encoded) <= MAX_TURN_CONTEXT_CHARACTERS:
+            return encoded
+        bounded = dict(context)
+        for key in ("timeline", "retrievedMemories", "preferences", "resolutions"):
+            values = bounded.get(key)
+            while isinstance(values, list) and values:
+                values.pop()
+                encoded = json.dumps(
+                    bounded,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                if len(encoded) <= MAX_TURN_CONTEXT_CHARACTERS:
+                    return encoded
+        working = bounded.get("workingContext")
+        if isinstance(working, dict):
+            bounded["workingContext"] = {
+                key: working[key]
+                for key in (
+                    "currentApplication",
+                    "currentWindow",
+                    "currentDocument",
+                )
+                if key in working
+            }
+        encoded = json.dumps(
+            bounded,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if len(encoded) <= MAX_TURN_CONTEXT_CHARACTERS:
+            return encoded
+        return json.dumps(
+            {
+                "workingContext": {},
+                "budget": {"truncated": True},
+            },
+            separators=(",", ":"),
         )
 
     def _deterministic_route_for_turn(
@@ -528,7 +602,13 @@ async def entrypoint(ctx: JobContext) -> None:
     async def fetch_turn_context(query: str) -> dict[str, Any]:
         raw = await rpc_to_mac(
             "get_turn_context",
-            json.dumps({"query": query}),
+            json.dumps(
+                {
+                    "query": query,
+                    "sessionId": ctx.room.name,
+                    "maxCharacters": MAX_TURN_CONTEXT_CHARACTERS,
+                }
+            ),
         )
         if not raw:
             return {}

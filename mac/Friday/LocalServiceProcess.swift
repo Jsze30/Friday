@@ -90,7 +90,7 @@ final class LocalServiceProcess {
     private func killOrphans() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-9", "-f", "-m src\\.main"]
+        p.arguments = ["-9", "-f", "--", "-m src\\.main"]
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         do {

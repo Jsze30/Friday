@@ -37,6 +37,31 @@ final class LatencyTraceStore: @unchecked Sendable {
         append(trace)
     }
 
+    func recordPerception(_ context: [String: Any]) {
+        var trace: [String: Any] = [
+            "recordedAt": ISO8601DateFormatter().string(from: Date()),
+            "type": "computer_perception",
+        ]
+        for key in [
+            "trigger",
+            "captureStatus",
+            "captureError",
+            "captureLatencyMs",
+            "ocrLatencyMs",
+            "semanticLatencyMs",
+            "imageChanged",
+            "imageWidth",
+            "imageHeight",
+            "lowPowerMode",
+            "thermalState",
+        ] {
+            if let value = context[key] {
+                trace[key] = value
+            }
+        }
+        append(trace)
+    }
+
     private func append(_ trace: [String: Any]) {
         queue.async { [path] in
             guard JSONSerialization.isValidJSONObject(trace),
@@ -63,4 +88,3 @@ final class LatencyTraceStore: @unchecked Sendable {
         }
     }
 }
-

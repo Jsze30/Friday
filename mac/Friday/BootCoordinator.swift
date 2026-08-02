@@ -13,6 +13,7 @@ final class BootCoordinator {
     func start() {
         LocationProvider.shared.start()
         MacPrimitiveProvider.shared.requestAccessibilityPermission()
+        ComputerPerceptionProvider.shared.start()
         Task { await CalendarContextProvider.shared.prepareAccess() }
         Task { await self.boot() }
     }
@@ -70,6 +71,7 @@ final class BootCoordinator {
 
     func shutdown() async {
         eventTask?.cancel()
+        ComputerPerceptionProvider.shared.stop()
         await liveKit.disconnect()
         LocalServiceProcess.shared.stop()
     }

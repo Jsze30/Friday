@@ -30,6 +30,15 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:43821/spotify/callback",
         alias="SPOTIFY_REDIRECT_URI",
     )
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    vision_model: str = Field(
+        default="gpt-4.1-mini",
+        alias="FRIDAY_VISION_MODEL",
+    )
+    cloud_visual_analysis: bool = Field(
+        default=True,
+        alias="FRIDAY_CLOUD_VISUAL_ANALYSIS",
+    )
 
     # openWakeWord accepts a pretrained model name or a custom ONNX/TFLite path.
     wake_model: str = Field(

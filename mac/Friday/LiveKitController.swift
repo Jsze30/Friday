@@ -190,13 +190,24 @@ final class LiveKitController: NSObject, RoomDelegate {
             }
             let request = Self.decodeJSON(data.payload) ?? [:]
             let query = request["query"] as? String ?? ""
+            let sessionId = request["sessionId"] as? String
+            let maxCharacters = request["maxCharacters"] as? Int ?? 8_000
             let started = Date()
-            let working = await MainActor.run {
+            let client = LocalServiceClient(port: port)
+            let perception = await ComputerPerceptionProvider.shared
+                .contextForTurn(query: query, client: client)
+            var working = await MainActor.run {
                 WorkingContextProvider.shared.snapshot()
             }
+            working["computerPerception"] = perception
             do {
-                let raw = try await LocalServiceClient(port: port)
-                    .resolveContext(query: query, working: working)
+                let raw = try await client
+                    .resolveContext(
+                        query: query,
+                        working: working,
+                        sessionId: sessionId,
+                        maxCharacters: maxCharacters
+                    )
                 guard var result = Self.decodeJSON(raw) else {
                     return Self.errorEnvelope("context response was invalid")
                 }
@@ -240,6 +251,12 @@ final class LiveKitController: NSObject, RoomDelegate {
                     as? [String: Any] else { return }
             await MainActor.run {
                 AppState.shared.applyHUDEvent(event)
+            }
+            if let port = await MainActor.run(
+                body: { BootCoordinator.shared.servicePort }
+            ) {
+                try? await LocalServiceClient(port: port)
+                    .recordContextEvent(event)
             }
         }
     }

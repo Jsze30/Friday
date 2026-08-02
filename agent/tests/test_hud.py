@@ -37,6 +37,7 @@ class HudPublisherTests(unittest.IsolatedAsyncioTestCase):
             [event["type"] for event in events], ["turn_started", "transcript"]
         )
         self.assertEqual(events[0]["turnId"], turn_id)
+        self.assertEqual(events[0]["sessionId"], events[1]["sessionId"])
         self.assertEqual(events[1]["text"], "Open that project")
         self.assertIn("elapsedMs", events[1])
 
