@@ -32,6 +32,7 @@ final class MacPrimitiveProvider {
     let toolNames: Set<String> = [
         "list_apps",
         "open_app",
+        "open_path",
         "open_url",
         "quit_app",
         "get_volume",
@@ -148,6 +149,41 @@ final class MacPrimitiveProvider {
                         ],
                         "latencyMs": 150,
                         "priority": 140,
+                    ]
+                ],
+            ],
+            [
+                "name": "open_path",
+                "description": """
+                Open a local file or folder with its default Mac application. \
+                Use an optional application name to open it in a specific app.
+                """,
+                "permission": "low_risk_write",
+                "parameters": [
+                    [
+                        "name": "path",
+                        "type": "string",
+                        "description": "Absolute or home-relative file or folder path.",
+                        "required": true,
+                    ],
+                    [
+                        "name": "application",
+                        "type": "string",
+                        "description": "Optional application name or bundle identifier.",
+                        "required": false,
+                    ],
+                ],
+                "actions": [
+                    [
+                        "id": "system.open_path",
+                        "description": "Open a local file, folder, or project.",
+                        "routes": [
+                            [
+                                "pattern": #"(?:open|show)\s+(?P<path>(?:/|~/).+?)(?:\s+(?:in|with|using)\s+(?P<application>[\w .'-]+))?"#,
+                            ]
+                        ],
+                        "latencyMs": 150,
+                        "priority": 150,
                     ]
                 ],
             ],
@@ -358,6 +394,8 @@ final class MacPrimitiveProvider {
             return listApps(arguments: arguments)
         case "open_app":
             return openApp(arguments: arguments)
+        case "open_path":
+            return await openPath(arguments: arguments)
         case "open_url":
             return await openURL(arguments: arguments)
         case "quit_app":
@@ -481,6 +519,80 @@ final class MacPrimitiveProvider {
                 "bundleId": Bundle(url: url)?.bundleIdentifier ?? "",
             ],
             error: opened ? nil : "could not open \(requested)"
+        )
+    }
+
+    private func openPath(arguments: [String: Any]) async -> String {
+        guard let rawPath = arguments["path"] as? String,
+              !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return envelope(ok: false, error: "path is required")
+        }
+
+        let expandedPath = (rawPath as NSString).expandingTildeInPath
+        let fileURL = URL(fileURLWithPath: expandedPath).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: fileURL.path,
+            isDirectory: &isDirectory
+        ) else {
+            return envelope(
+                spoken: "I could not find that file or folder.",
+                data: ["error": "path_not_found", "path": fileURL.path]
+            )
+        }
+
+        let requestedApplication =
+            (arguments["application"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let requestedApplication, !requestedApplication.isEmpty {
+            guard let applicationURL = findInstalledApplication(requestedApplication) else {
+                return envelope(
+                    spoken: "I could not find \(requestedApplication).",
+                    data: [
+                        "error": "app_not_found",
+                        "application": requestedApplication,
+                        "path": fileURL.path,
+                    ]
+                )
+            }
+
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            do {
+                let application = try await NSWorkspace.shared.open(
+                    [fileURL],
+                    withApplicationAt: applicationURL,
+                    configuration: configuration
+                )
+                let applicationName =
+                    application.localizedName
+                    ?? applicationURL.deletingPathExtension().lastPathComponent
+                return envelope(
+                    spoken: "Opened \(fileURL.lastPathComponent) in \(applicationName).",
+                    data: [
+                        "path": fileURL.path,
+                        "isDirectory": isDirectory.boolValue,
+                        "application": applicationName,
+                        "bundleId": application.bundleIdentifier ?? "",
+                    ]
+                )
+            } catch {
+                return envelope(
+                    ok: false,
+                    error: "could not open \(fileURL.path) in \(requestedApplication): \(error.localizedDescription)"
+                )
+            }
+        }
+
+        let opened = NSWorkspace.shared.open(fileURL)
+        return envelope(
+            ok: opened,
+            spoken: opened ? "Opened \(fileURL.lastPathComponent)." : nil,
+            data: [
+                "path": fileURL.path,
+                "isDirectory": isDirectory.boolValue,
+            ],
+            error: opened ? nil : "could not open \(fileURL.path)"
         )
     }
 

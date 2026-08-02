@@ -13,6 +13,7 @@ final class BootCoordinator {
     func start() {
         LocationProvider.shared.start()
         MacPrimitiveProvider.shared.requestAccessibilityPermission()
+        Task { await CalendarContextProvider.shared.prepareAccess() }
         Task { await self.boot() }
     }
 

@@ -2,18 +2,20 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
+    private var hud: HUDPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu-bar-only; LSUIElement=true in Info.plist also enforces this.
         NSApp.setActivationPolicy(.accessory)
 
         menuBar = MenuBarController()
+        hud = HUDPanelController()
         BootCoordinator.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         // Synchronously kill the child Python service. Must not bounce through
-        // the @MainActor here — main is blocked, so any `Task { ... }` would
+        // the @MainActor here - main is blocked, so any `Task { ... }` would
         // deadlock and the helper would survive (orange mic indicator).
         LocalServiceProcess.shared.stop()
     }

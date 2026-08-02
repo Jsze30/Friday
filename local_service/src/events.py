@@ -22,7 +22,7 @@ class EventBus:
             self._subscribers.discard(q)
 
     def publish(self, event: dict[str, Any]) -> None:
-        # Called from any thread/loop — schedule onto current loop subscribers.
+        # Called from any thread/loop - schedule onto current loop subscribers.
         for q in list(self._subscribers):
             try:
                 q.put_nowait(event)

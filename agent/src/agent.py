@@ -5,8 +5,9 @@ import inspect
 import json
 import logging
 import os
+import re
 import uuid
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,8 @@ from openai.types import Reasoning as OpenAIReasoning
 from action_catalog import ActionCatalog, merge_action_manifests
 from action_tool import build_action_tool
 from capability_tool import build_capability_tool
-from model_router import deterministic_tool_route, route_request
+from hud import HudPublisher
+from model_router import DeterministicToolRoute, deterministic_tool_route, route_request
 from turn_gate import PreRollAudioInput, PreRollReceiver
 
 FOLLOWUP_SECONDS = 5.0
@@ -41,6 +43,12 @@ LOCATION_PROFILE_KEYS = {
     "home_city",
     "location",
 }
+CONTEXT_RELEVANCE_PATTERN = re.compile(
+    r"\b(?:this|that|these|those|current|project|repo|repository|file|document|"
+    r"page|website|site|tab|app|application|window|calendar|schedule|meeting|"
+    r"event|today|tomorrow|next|coming\s+up|working\s+on|doing\s+now)\b",
+    re.IGNORECASE,
+)
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 
@@ -96,6 +104,9 @@ PARAM_TYPE_MAP: dict[str, Any] = {
     "boolean": bool,
     "array": list[str],
 }
+
+TurnContextProvider = Callable[[str], Awaitable[dict[str, Any]]]
+HudEventSink = Callable[[str, dict[str, Any]], None]
 
 
 def matching_route_tools(
@@ -160,6 +171,8 @@ class FridayAgent(Agent):
         complex_llm: llm.LLM,
         action_catalog: ActionCatalog | None = None,
         complex_extra_kwargs: dict[str, Any] | None = None,
+        turn_context_provider: TurnContextProvider | None = None,
+        hud_event_sink: HudEventSink | None = None,
     ) -> None:
         super().__init__(
             instructions=instructions,
@@ -170,7 +183,48 @@ class FridayAgent(Agent):
         self._complex_llm = complex_llm
         self._action_catalog = action_catalog or ActionCatalog()
         self._complex_extra_kwargs = complex_extra_kwargs or {}
+        self._turn_context_provider = turn_context_provider
+        self._hud_event_sink = hud_event_sink
+        self._current_turn_context: dict[str, Any] = {}
         self._timezone = ZoneInfo("UTC")
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: llm.ChatMessage,
+    ) -> None:
+        self._current_turn_context = {}
+        if self._turn_context_provider is None or not new_message.text_content:
+            return
+        try:
+            context = await asyncio.wait_for(
+                self._turn_context_provider(new_message.text_content),
+                timeout=0.35,
+            )
+        except TimeoutError:
+            logger.warning("turn context timed out")
+            return
+        except Exception:
+            logger.exception("turn context retrieval failed")
+            return
+        if not context:
+            return
+        self._current_turn_context = context
+        if self._context_is_relevant(new_message.text_content, context):
+            turn_ctx.add_message(
+                role="system",
+                content=(
+                    "<working_context>\n"
+                    + json.dumps(context, separators=(",", ":"))
+                    + "\n</working_context>\n"
+                    "Use this only for the current request. Prefer explicit saved "
+                    "reference resolutions over guesses. If the context is still "
+                    "ambiguous, ask one short question."
+                ),
+                created_at=new_message.created_at - 0.000001,
+            )
+        if self._hud_event_sink:
+            self._hud_event_sink("context", context)
 
     def update_ambient_context(
         self,
@@ -200,6 +254,29 @@ class FridayAgent(Agent):
         latest = chat_ctx.items[-1]
         return isinstance(latest, llm.ChatMessage) and latest.role == "user"
 
+    @staticmethod
+    def _context_is_relevant(query: str, context: dict[str, Any]) -> bool:
+        return bool(context.get("resolutions")) or bool(
+            CONTEXT_RELEVANCE_PATTERN.search(query)
+        )
+
+    def _deterministic_route_for_turn(
+        self,
+        chat_ctx: llm.ChatContext,
+    ) -> DeterministicToolRoute | None:
+        if not self._is_initial_user_inference(chat_ctx):
+            return None
+        route = deterministic_tool_route(
+            self._latest_user_text(chat_ctx),
+            self._action_catalog,
+        )
+        if route is None or not self._current_turn_context.get("resolutions"):
+            return route
+        action = route.arguments.get("action")
+        if isinstance(action, str) and action.startswith("context."):
+            return route
+        return None
+
     async def llm_node(
         self,
         chat_ctx: llm.ChatContext,
@@ -207,11 +284,7 @@ class FridayAgent(Agent):
         model_settings: ModelSettings,
     ) -> AsyncIterable[llm.ChatChunk]:
         user_text = self._latest_user_text(chat_ctx)
-        deterministic_route = (
-            deterministic_tool_route(user_text, self._action_catalog)
-            if self._is_initial_user_inference(chat_ctx)
-            else None
-        )
+        deterministic_route = self._deterministic_route_for_turn(chat_ctx)
         if deterministic_route:
             matching_tools = matching_route_tools(
                 tools,
@@ -268,6 +341,8 @@ class FridayAgent(Agent):
             ),
         )
 
+        response_text = ""
+        last_hud_update = 0.0
         async with selected_llm.chat(
             chat_ctx=turn_chat_ctx,
             tools=tools,
@@ -276,7 +351,30 @@ class FridayAgent(Agent):
             extra_kwargs=extra_kwargs,
         ) as stream:
             async for chunk in stream:
+                content = chunk.delta.content if chunk.delta else None
+                if content:
+                    response_text += content
+                    now = asyncio.get_running_loop().time()
+                    if self._hud_event_sink and now - last_hud_update >= 0.05:
+                        self._hud_event_sink(
+                            "transcript",
+                            {
+                                "role": "assistant",
+                                "text": response_text,
+                                "isFinal": False,
+                            },
+                        )
+                        last_hud_update = now
                 yield chunk
+        if response_text and self._hud_event_sink:
+            self._hud_event_sink(
+                "transcript",
+                {
+                    "role": "assistant",
+                    "text": response_text,
+                    "isFinal": True,
+                },
+            )
 
 
 server = AgentServer()
@@ -337,6 +435,10 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     await ctx.connect()
+
+    hud = HudPublisher(ctx.room.local_participant)
+    hud.start()
+    ctx.add_shutdown_callback(hud.aclose)
 
     preroll_receiver = PreRollReceiver(ctx.room)
     preroll_receiver.register()
@@ -419,6 +521,26 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
                 await asyncio.sleep(0.25 * (2**attempt))
         return None
+
+    def emit_hud(event_type: str, payload: dict[str, Any]) -> None:
+        hud.emit(event_type, **payload)
+
+    async def fetch_turn_context(query: str) -> dict[str, Any]:
+        raw = await rpc_to_mac(
+            "get_turn_context",
+            json.dumps({"query": query}),
+        )
+        if not raw:
+            return {}
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("turn context returned invalid JSON")
+            return {}
+        if not isinstance(result, dict) or not result.get("ok", True):
+            return {}
+        result.pop("ok", None)
+        return result
 
     async def call_tool(
         tool_name: str,
@@ -538,6 +660,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # RPC startup is more reliable when the Mac receives one request at a time.
     # Ambient context can then load alongside session.start.
     await wait_for_mac()
+    hud.set_destination(mac_identity())
     primitive_tools, primitive_manifests = await fetch_tools()
     capability_catalog = await fetch_capability_catalog()
     context_task = asyncio.create_task(startup_rpc("get_context"))
@@ -545,6 +668,7 @@ async def entrypoint(ctx: JobContext) -> None:
     capability_tool = build_capability_tool(
         rpc_to_mac,
         supported_capabilities,
+        event_sink=emit_hud,
     )
     action_catalog = ActionCatalog(
         merge_action_manifests(capability_catalog, primitive_manifests)
@@ -553,6 +677,7 @@ async def entrypoint(ctx: JobContext) -> None:
         rpc_to_mac,
         call_tool,
         action_catalog,
+        event_sink=emit_hud,
     )
     fallback_tools = primitive_tools
     tools_list: list[llm.Tool | llm.Toolset] = [
@@ -591,6 +716,8 @@ async def entrypoint(ctx: JobContext) -> None:
         complex_llm=complex_llm,
         action_catalog=action_catalog,
         complex_extra_kwargs=complex_extra_kwargs,
+        turn_context_provider=fetch_turn_context,
+        hud_event_sink=emit_hud,
     )
 
     @ctx.room.local_participant.register_rpc_method("profile_updated")
@@ -650,6 +777,7 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         session.input.set_audio_enabled(False)
         turn_active = False
+        hud.emit("turn_finished")
         await rpc_to_mac("return_to_sleep")
         await drain_gate_soon()
 
@@ -659,6 +787,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("activate_turn from %s", data.caller_identity)
         cancel_followup()
         turn_active = True
+        hud.begin_turn()
         # Wait briefly for the pre-roll byte stream (sent just before this
         # RPC) so speech spoken across the wake word is prepended in order.
         frames = await preroll_receiver.take(timeout=1.0)
@@ -697,8 +826,50 @@ async def entrypoint(ctx: JobContext) -> None:
                 asyncio.create_task(rpc_to_mac("set_assistant_state", "listening"))
 
     @session.on("user_input_transcribed")
-    def _on_user_input(_ev) -> None:
+    def _on_user_input(ev) -> None:
         cancel_followup()
+        transcript = str(getattr(ev, "transcript", "") or "")
+        if transcript:
+            hud.emit(
+                "transcript",
+                role="user",
+                text=transcript,
+                isFinal=bool(getattr(ev, "is_final", False)),
+            )
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item(ev) -> None:
+        item = getattr(ev, "item", None)
+        if not isinstance(item, llm.ChatMessage):
+            return
+        text = item.text_content or ""
+        role = str(item.role)
+        if text and role in {"user", "assistant"}:
+            hud.emit(
+                "transcript",
+                role=role,
+                text=text,
+                isFinal=True,
+                interrupted=bool(getattr(item, "interrupted", False)),
+            )
+        metrics_report = getattr(item, "metrics", None)
+        if role != "assistant" or metrics_report is None:
+            return
+        latency: dict[str, float] = {}
+        for key in (
+            "e2e_latency",
+            "llm_node_ttft",
+            "tts_node_ttfb",
+            "playback_latency",
+        ):
+            try:
+                value = metrics_report.get(key)
+            except (AttributeError, TypeError):
+                value = None
+            if isinstance(value, int | float):
+                latency[key] = round(float(value) * 1000, 1)
+        if latency:
+            hud.emit("latency", unit="ms", metrics=latency)
 
     async def rearm_mac_after_session_error() -> None:
         await rpc_to_mac("return_to_sleep")
@@ -708,6 +879,11 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_session_error(ev) -> None:
         nonlocal turn_active
         error = getattr(ev, "error", None)
+        hud.emit(
+            "error",
+            message=str(error or "Friday encountered an error."),
+            recoverable=bool(getattr(error, "recoverable", True)),
+        )
         if not turn_active or getattr(error, "recoverable", True):
             return
 

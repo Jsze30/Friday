@@ -11,6 +11,7 @@ final class LiveKitController: NSObject, RoomDelegate {
     /// Topic for the pre-roll PCM byte stream; the agent registers a handler
     /// for the same topic and prepends the audio to the turn's STT input.
     private static let preRollTopic = "friday.wake-preroll"
+    private static let hudTopic = "friday.hud"
 
     /// Connects to LiveKit and publishes the mic once. The capture processor
     /// sends silence while sleeping, so AEC and local wake scoring stay warm
@@ -37,6 +38,7 @@ final class LiveKitController: NSObject, RoomDelegate {
         // Register these handlers before publishing the microphone, which can
         // give the dispatched agent enough time to enter the room and call us.
         await registerSwiftRPCs()
+        try await registerHUDStreamHandler()
 
         startWakeDetection(servicePort: servicePort)
 
@@ -61,6 +63,7 @@ final class LiveKitController: NSObject, RoomDelegate {
         }
         await wakeAudioSender?.close()
         wakeAudioSender = nil
+        await room.unregisterTextStreamHandler(for: Self.hudTopic)
         await room.disconnect()
     }
 
@@ -83,6 +86,7 @@ final class LiveKitController: NSObject, RoomDelegate {
         guard let wakeDetector else { return }
         let preRoll = wakeDetector.pauseAndTakePreRoll()
         Task {
+            AppState.shared.beginTurn()
             AppState.shared.set(.wakeDetected)
             do {
                 await sendPreRoll(preRoll)
@@ -174,6 +178,39 @@ final class LiveKitController: NSObject, RoomDelegate {
                 "location": location,
             ])
         }
+        try? await room.registerRpcMethod("get_turn_context") { data in
+            guard let port = await BootCoordinator.shared.servicePort else {
+                return Self.encodeJSON([
+                    "ok": true,
+                    "workingContext": await MainActor.run {
+                        WorkingContextProvider.shared.snapshot()
+                    },
+                    "resolutions": [],
+                ])
+            }
+            let request = Self.decodeJSON(data.payload) ?? [:]
+            let query = request["query"] as? String ?? ""
+            let started = Date()
+            let working = await MainActor.run {
+                WorkingContextProvider.shared.snapshot()
+            }
+            do {
+                let raw = try await LocalServiceClient(port: port)
+                    .resolveContext(query: query, working: working)
+                guard var result = Self.decodeJSON(raw) else {
+                    return Self.errorEnvelope("context response was invalid")
+                }
+                result["contextLatencyMs"] = Date().timeIntervalSince(started) * 1_000
+                return Self.encodeJSON(result)
+            } catch {
+                return Self.encodeJSON([
+                    "ok": true,
+                    "workingContext": working,
+                    "resolutions": [],
+                    "contextLatencyMs": Date().timeIntervalSince(started) * 1_000,
+                ])
+            }
+        }
         try? await room.registerRpcMethod("tool_call") { data in
             guard let port = await BootCoordinator.shared.servicePort else { return "{}" }
             return await self.executeBridgedTool(
@@ -190,6 +227,19 @@ final class LiveKitController: NSObject, RoomDelegate {
                     .executeCapability(jsonPayload: data.payload)
             } catch {
                 return Self.errorEnvelope("local capability call failed")
+            }
+        }
+    }
+
+    private func registerHUDStreamHandler() async throws {
+        try await room.registerTextStreamHandler(for: Self.hudTopic) {
+            reader, _ in
+            let text = try await reader.readAll()
+            guard let data = text.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any] else { return }
+            await MainActor.run {
+                AppState.shared.applyHUDEvent(event)
             }
         }
     }

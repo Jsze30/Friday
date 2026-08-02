@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import unittest
@@ -52,6 +53,34 @@ class CapabilityToolTests(unittest.TestCase):
 
         names = {tool.info.name for tool in proxy.tools}
         self.assertEqual(names, {"tool_search", "call_tool"})
+
+    def test_failed_start_closes_the_hud_activity(self) -> None:
+        events: list[tuple[str, dict]] = []
+
+        async def rpc_call(_method: str, _payload: str) -> str:
+            return '{"ok": true}'
+
+        tool = build_capability_tool(
+            rpc_call,
+            ["files"],
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+
+        result = asyncio.run(
+            tool(
+                context=object(),
+                capability="files",
+                goal="Read a file",
+                inputs_json="{}",
+            )
+        )
+
+        self.assertIn("did not return a task ID", result)
+        self.assertEqual(
+            [event for event, _ in events],
+            ["capability_started", "capability_completed"],
+        )
+        self.assertFalse(events[-1][1]["ok"])
 
 
 if __name__ == "__main__":

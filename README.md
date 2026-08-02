@@ -15,7 +15,7 @@ served by a localhost-only Python service.
 - Listens locally for the wake phrase, currently `friday`.
 - Connects the Mac app to a LiveKit Cloud room when the app starts.
 - Dispatches the `friday-agent` LiveKit worker into that room.
-- Enables the microphone only after local wake detection.
+- Keeps one echo-cancelled microphone capture warm, sends silence while sleeping, and forwards a two-second pre-roll when Friday wakes.
 - Runs a spoken assistant powered by Deepgram STT/TTS, routed OpenAI models, and Silero VAD.
 - Gives the assistant one fast `run_action` tool backed by integration-declared action manifests.
 - Gives the assistant one high-level capability runner backed by ranked providers.
@@ -25,6 +25,9 @@ served by a localhost-only Python service.
 - Executes requested actions immediately without confirmation prompts while keeping path and network safeguards.
 - Supplies a live human-readable Core Location place and a fresh local clock as ambient context.
 - Stores stable profile facts locally and injects them into the agent prompt.
+- Shows a non-activating HUD with live user text, streamed Friday text, state, resolved references, action progress, and end-to-end latency.
+- Reads a small local working-context snapshot containing the frontmost app, focused window or document, active URL when available, and upcoming calendar events.
+- Stores explicit reference memories such as "the project means Friday" in a local SQLite database.
 - Returns to sleep after the agent answers and a short follow-up window expires.
 
 ## Repository Layout
@@ -41,7 +44,8 @@ served by a localhost-only Python service.
 |-- local_service/         # Local FastAPI helper, Python
 |   |-- src/main.py        # Uvicorn entrypoint, port file, wake detector startup
 |   |-- src/routes.py      # HTTP and WebSocket API used by the Swift app
-|   |-- src/wake.py        # Vosk wake-word detector over sounddevice
+|   |-- src/wake.py        # openWakeWord scoring for echo-cancelled PCM from Swift
+|   |-- src/context_store.py # SQLite reference memory and context resolution
 |   |-- src/tokens.py      # LiveKit AccessToken minting with agent dispatch
 |   |-- src/profile.py     # Local profile storage and update events
 |   |-- src/capabilities/  # Provider broker and background task runtime
@@ -60,8 +64,7 @@ served by a localhost-only Python service.
 `-- README.md              # This file
 ```
 
-Generated and local-only directories such as `mac/build/`, Python virtualenvs,
-Vosk models, and env files are not part of the source architecture.
+Generated and local-only directories such as `mac/build/`, Python virtualenvs, and env files are not part of the source architecture.
 
 ## Components
 
@@ -78,7 +81,11 @@ Main files:
   and stops the Python child process on quit.
 - `mac/Friday/MenuBarController.swift` renders status icons and the quit menu.
 - `mac/Friday/AppState.swift` tracks assistant states such as `sleeping`,
-  `listening`, `thinking`, `speaking`, and `error`.
+  `listening`, `thinking`, `acting`, `speaking`, and `error` together with the current HUD content.
+- `mac/Friday/HUDPanelController.swift` owns the non-activating floating panel and its lifecycle.
+- `mac/Friday/HUDView.swift` renders the compact animated conversation surface.
+- `mac/Friday/WorkingContextProvider.swift` captures the active app, focused window, document, URL, and calendar context.
+- `mac/Friday/CalendarContextProvider.swift` reads the next 24 hours of calendar events when permission is granted.
 - `mac/Friday/BootCoordinator.swift` owns startup orchestration.
 - `mac/Friday/LocalServiceProcess.swift` launches `local_service` as a child
   process and reads its selected port.
@@ -104,9 +111,10 @@ Responsibilities:
 - Pick a free localhost port.
 - Write the selected port to
   `~/Library/Application Support/Friday/port`.
-- Start the Vosk wake-word detector.
+- Score Swift's echo-cancelled wake audio with openWakeWord.
 - Mint LiveKit tokens for the Mac participant.
 - Serve profile data from local disk.
+- Store and resolve durable personal reference aliases in SQLite.
 - Register and execute local tools.
 - Rank, execute, verify, retry, and cancel high-level capability providers.
 - Publish wake/profile events over a WebSocket consumed by Swift.
@@ -117,12 +125,13 @@ Local service API:
 | --- | --- |
 | `GET /health` | Returns `{ ok, wakePaused }`. |
 | `POST /token` | Mints a LiveKit room token and dispatches the configured agent. |
-| `POST /wake/pause` | Pauses wake-word processing while LiveKit owns the mic. |
 | `POST /wake/resume` | Resumes wake-word processing after the turn ends. |
 | `GET /profile` | Returns the local profile JSON. |
 | `PUT /profile` | Replaces/saves the local profile and emits `profile_updated`. |
 | `POST /tools/execute` | Executes a tool by name with JSON arguments. |
 | `POST /capabilities/execute` | Lists, starts, polls, or cancels a capability task. |
+| `POST /context/resolve` | Combines the current Mac snapshot with relevant saved reference memories. |
+| `GET /context/references` | Lists saved reference memories. |
 | `WS /events` | Streams local events such as `wake_detected` and `profile_updated`. |
 
 ### `agent/`: LiveKit Cloud Agent
@@ -139,8 +148,11 @@ Current model pipeline in `agent/src/agent.py`:
 
 The agent starts with `BASE_INSTRUCTIONS`, then appends profile facts and a live Core Location snapshot when available.
 It injects the current local time on every LLM turn.
+It retrieves a bounded local working-context snapshot before every completed user turn.
+It injects the snapshot only when the request contains a resolved reference or context-dependent language, preserving preemptive generation for ordinary commands.
 It exposes `run_action` for fast deterministic operations and `run_capability` for intelligent multi-step work.
 It places dynamically discovered primitives behind LiveKit's fixed `tool_search` and `call_tool` interface.
+It publishes structured HUD events over the private `friday.hud` LiveKit text-stream topic.
 
 Deployment metadata:
 
@@ -165,13 +177,19 @@ Swift menu bar app
 LiveKit Cloud room <---- deployed friday-agent worker
       ^
       |
-      | LiveKit RPC: capability_call / tool_call / get_context
+      | LiveKit RPC: capability_call / tool_call / get_context / get_turn_context
       |
 Swift menu bar app
       |
       | HTTP localhost
       v
-local_service tools/profile/token API
+local_service tools/profile/context/token API
+
+Agent structured HUD events
+      |
+      | LiveKit text stream: friday.hud
+      v
+Non-activating Swift HUD
 ```
 
 The data/control boundary is intentional:
@@ -188,8 +206,7 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 1. The menu bar app launches.
 2. `LocalServiceProcess.start()` kills orphaned `python -m src.main` processes,
    clears any stale port file, and starts the local service from its venv.
-3. `local_service` picks a free localhost port, writes it to
-   `~/Library/Application Support/Friday/port`, starts Vosk, and starts FastAPI.
+3. `local_service` picks a free localhost port, writes it to `~/Library/Application Support/Friday/port`, loads openWakeWord, and starts FastAPI.
 4. Swift polls the port file, creates a `LocalServiceClient`, and calls
    `GET /health`.
 5. Swift calls `POST /token`.
@@ -198,11 +215,12 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
    - a Mac participant identity like `mac-<hex>`;
    - publish/subscribe/data permissions;
    - room config dispatching the `friday-agent` agent.
-7. Swift connects to LiveKit with the microphone disabled.
+7. Swift connects to LiveKit, publishes one warm microphone track, and replaces outgoing audio with silence while Friday sleeps.
 8. Swift registers RPC methods:
    - `return_to_sleep`
    - `set_assistant_state`
    - `get_context`
+   - `get_turn_context`
    - `capability_call`
    - `tool_call`
 9. LiveKit dispatches the cloud agent into the room.
@@ -212,7 +230,7 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 
 ## Turn Lifecycle
 
-1. Vosk detects the wake phrase in `local_service/src/wake.py`.
+1. Swift copies echo-cancelled wake audio to `local_service`, where openWakeWord detects the wake phrase.
 2. `local_service` publishes:
 
    ```json
@@ -225,26 +243,62 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
    ```
 
 3. Swift receives the event over `WS /events`.
-4. Swift pauses local wake processing with `POST /wake/pause`.
-5. Swift enables the LiveKit microphone and calls the agent RPC
-   `activate_turn`.
-6. The agent enables audio input and listens.
-7. Agent state changes are sent back to Swift with `set_assistant_state`.
-8. For a clear registered command, the local router selects the exact action without another model decision.
-9. The agent emits a `run_action` call directly with the exact catalog-produced arguments, skipping the first model call, and the action runs synchronously through its primitive or fastest available provider.
-10. For intelligent or multi-step work, the LLM calls `run_capability`.
-11. The agent starts a local capability task through `capability_call`.
-12. Fast tasks return immediately, while slow tasks release the voice loop and continue in the background.
-13. The agent polls small status messages and cancels local work if the user cancels the LiveKit task.
-14. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
-15. Swift forwards action, capability, and primitive calls to their corresponding localhost APIs.
-16. `local_service` returns structured results with provider traces or primitive data.
-17. The agent speaks the result or incorporates the tool result into its answer.
-18. After speaking, the agent enters a 5 second follow-up window.
-19. If no follow-up input arrives, the agent disables audio and calls
-    `return_to_sleep`.
-20. Swift disables the microphone, resumes local wake processing, and sets the
-    app state to `sleeping`.
+4. The HUD appears immediately and Swift sends the two-second pre-roll before calling the agent RPC `activate_turn`.
+5. The agent enables its audio gate and listens while the published microphone track remains warm.
+6. Partial and final user transcripts stream to the HUD.
+7. Before the reply, the agent calls `get_turn_context`, and Swift combines the current Mac and calendar snapshot with locally saved reference memories.
+8. For a context-dependent request, the agent injects that bounded context only into the current inference and publishes any resolved references to the HUD.
+9. Agent state changes are sent back to Swift with `set_assistant_state`.
+10. For a clear registered command without a contextual reference, the local router selects the exact action without another model decision.
+11. The agent emits a `run_action` call directly with the exact catalog-produced arguments, skipping the first model call, and the action runs synchronously through its primitive or fastest available provider.
+12. If a command contains a resolved phrase such as `the project`, the fast model receives the canonical target and selects the correct action instead of running a misleading raw text route.
+13. Action start and completion events appear in the HUD.
+14. For intelligent or multi-step work, the LLM calls `run_capability`.
+15. The agent starts a local capability task through `capability_call`.
+16. Fast tasks return immediately, while slow tasks continue in the background and publish progress to the HUD.
+17. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
+18. Swift forwards action, capability, and primitive calls to their corresponding localhost APIs.
+19. `local_service` returns structured results with provider traces or primitive data.
+20. Friday's response text streams to the HUD while the agent speaks it.
+21. LiveKit's per-turn metrics publish the measured end-of-speech-to-first-response latency to the HUD.
+22. After speaking, the agent enters a 5 second follow-up window.
+23. If no follow-up input arrives, the agent disables its audio gate, calls `return_to_sleep`, and the HUD fades away.
+
+## HUD And Personal Context Proof Of Concept
+
+The proof of concept is one vertical slice across the Mac app, local service, and cloud agent.
+It is intentionally smaller than the full personal context vision.
+
+The HUD is a 440-point non-activating panel positioned below the menu bar on the display containing the pointer.
+It remains hidden while Friday sleeps, appears on wake, never becomes the key window, ignores pointer events, and fades after the follow-up window.
+Its compact states show listening motion, partial user text, thinking or action detail, streamed assistant text, the highest-value resolved reference, a result summary, and measured end-to-end latency.
+
+The working-context snapshot currently contains:
+
+- Frontmost application name and bundle identifier.
+- Focused window title.
+- Focused document path or URL when the app exposes it through macOS Accessibility.
+- The active browser URL when it is exposed as the focused document.
+- Up to five calendar events in the next 24 hours when Calendar access is granted.
+- A project inferred from the current document's nearest Git repository.
+- Explicit saved reference memories retrieved from local SQLite.
+
+Saved aliases are generic rather than app-specific.
+For example, saying `Friday, when I say the project, I mean Friday` stores the mapping through the deterministic `context.remember_reference` action.
+Later uses of `the project` retrieve that saved meaning before the model answers.
+An explicit saved mapping wins over a conflicting live project guess.
+
+To preview the HUD without speaking, open Friday's menu bar menu and choose `Preview HUD`.
+The preview walks through listening, context resolution, acting, speaking, and latency states without running a real action.
+
+After rebuilding the Mac app, restarting the local service, and deploying the agent, an end-to-end smoke test is:
+
+1. Open a file in the Friday repository.
+2. Say `Friday, explain this file` and confirm the HUD shows the active document resolution.
+3. Say `Friday, when I say the project, I mean Friday` and confirm the memory action completes without confirmation.
+4. Restart Friday and say `Friday, open the project` to confirm the saved reference survives.
+5. Ask about an upcoming event and confirm the response uses Calendar only after permission is granted.
+6. Confirm the HUD displays the measured first-response latency after Friday speaks.
 
 ## Action System
 
@@ -393,6 +447,7 @@ Current primitive kernel:
 | `fetch_url` | `read_only` | Fetches a public HTTP or HTTPS URL while blocking local and private addresses. |
 | `list_apps` | `read_only` | Lists installed or running Mac applications. |
 | `open_app` | `low_risk_write` | Launches or activates any installed Mac application. |
+| `open_path` | `low_risk_write` | Opens a local file, folder, or project in its default app or a named app. |
 | `open_url` | `low_risk_write` | Opens an HTTP or HTTPS URL in Arc or another installed browser. |
 | `quit_app` | `low_risk_write` | Gracefully asks a running application to quit immediately. |
 | `get_volume` | `read_only` | Reads native Core Audio output volume and mute state. |
@@ -472,6 +527,7 @@ Required for the cloud agent:
 | `LIVEKIT_API_KEY` | LiveKit API key. |
 | `LIVEKIT_API_SECRET` | LiveKit API secret. |
 | `ANTHROPIC_API_KEY` | Anthropic LLM access. |
+| `OPENAI_API_KEY` | OpenAI LLM access for the default fast and complex models. |
 | `DEEPGRAM_API_KEY` | Deepgram STT/TTS access. |
 
 Optional:
@@ -499,19 +555,19 @@ Optional:
 | --- | --- | --- |
 | `SPOTIFY_CLIENT_ID` | none | Enables the Spotify provider using PKCE authentication. |
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:43821/spotify/callback` | Exact loopback callback registered in the Spotify dashboard. |
-
-Spotify access and refresh tokens are stored in macOS Keychain under the service name `com.friday.spotify.oauth`.
-The Spotify Client Secret is not used.
-The provider requests playback-state, playback-control, private-playlist, and collaborative-playlist scopes.
 | `FRIDAY_AGENT_NAME` | `friday-agent` | Agent dispatch name embedded in room tokens. |
 | `FRIDAY_ROOM_PREFIX` | `friday` | Prefix for generated LiveKit room names. |
 | `FRIDAY_TOKEN_TTL_SECONDS` | `600` | Token lifetime. |
-| `FRIDAY_VOSK_MODEL_PATH` | `models/vosk-model-small-en-us-0.15` | Wake model path, relative to `local_service/` unless absolute. |
-| `FRIDAY_WAKE_PHRASE` | `friday` | Wake phrase recognized by Vosk grammar. |
+| `FRIDAY_WAKE_MODEL` | `models/hey_friday.onnx` | A pretrained openWakeWord model name or a custom `.onnx` or `.tflite` path. |
+| `FRIDAY_WAKE_THRESHOLD` | `0.5` | Minimum openWakeWord confidence required to wake. |
 | `FRIDAY_WAKE_DEBOUNCE_MS` | `1500` | Minimum time between wake events. |
 | `FRIDAY_ALLOWED_PATHS` | empty | Extra allowed file roots separated by the platform path separator. |
 | `FRIDAY_CODE_AGENT` | auto-detected | Executable path or command name for the read-only coding specialist. |
 | `FRIDAY_CAPABILITY_PROVIDERS_JSON` | `[]` | JSON array of trusted external capability providers. |
+
+Spotify access and refresh tokens are stored in macOS Keychain under the service name `com.friday.spotify.oauth`.
+The Spotify Client Secret is not used.
+The provider requests playback-state, playback-control, private-playlist, and collaborative-playlist scopes.
 
 Do not commit real `.env`, `.env.local`, or `secrets.env` files.
 
@@ -526,16 +582,18 @@ Prerequisites:
 - `uv`.
 - LiveKit CLI (`lk`) for agent deployment.
 - A LiveKit Cloud project and API key/secret.
-- Deepgram and Anthropic API keys for the cloud agent.
+- Deepgram and OpenAI API keys for the default cloud agent configuration.
+- An Anthropic API key only when `FRIDAY_COMPLEX_MODEL` selects a Claude model.
 - A microphone and macOS microphone permission for the menu bar app.
 - macOS location permission for location-aware requests.
+- macOS Accessibility permission for working context and generic UI controls.
+- Optional macOS Calendar permission for upcoming-event context.
 
 Install the local service:
 
 ```bash
 cd local_service
 uv sync
-./scripts/fetch_vosk_model.sh
 ```
 
 Create `local_service/.env` with at least:
@@ -663,9 +721,11 @@ must reconnect to pick it up.
 | --- | --- |
 | `~/Library/Application Support/Friday/port` | Current local service port file. |
 | `~/Library/Application Support/Friday/profile.json` | Local profile facts. |
+| `~/Library/Application Support/Friday/context.sqlite3` | Durable personal reference memories. |
 | `~/Library/Logs/Friday/local_service.log` | Rotating local service log. |
+| `~/Library/Logs/Friday/latency.jsonl` | Privacy-filtered per-turn HUD and latency timing events without transcript text. |
 | `mac/build/` | Xcode build output when using the documented build command. |
-| `local_service/models/` | Downloaded Vosk wake-word model. |
+| `local_service/models/` | Local openWakeWord model files. |
 
 The local service logger writes rotating logs with 2 MB files and 3 backups.
 
@@ -695,22 +755,14 @@ uv sync
 
 ### Wake Detection Fails On Startup
 
-Make sure the Vosk model exists:
-
-```bash
-cd local_service
-./scripts/fetch_vosk_model.sh
-```
-
-If you changed `FRIDAY_VOSK_MODEL_PATH`, verify that it resolves to an existing
-model directory.
+If `FRIDAY_WAKE_MODEL` points to a custom model, verify that the `.onnx` or `.tflite` file exists.
+The bundled Friday model is `local_service/models/hey_friday.onnx`.
 
 ### The Orange Microphone Indicator Stays On
 
-The local wake detector owns a microphone stream while the service is running.
-Quit the menu bar app cleanly so `LocalServiceProcess.stop()` can send SIGTERM
-and wait for Python to release the stream. On next launch, the app also runs
-`pkill -9 -f '-m src\.main'` to clean up orphaned service processes.
+The Swift LiveKit capture owns the microphone stream while Friday is running.
+Quit the menu bar app cleanly so LiveKit releases that capture and `LocalServiceProcess.stop()` terminates the Python helper.
+On next launch, the app also runs `pkill -9 -f '-m src\.main'` to clean up orphaned service processes.
 
 ### The Agent Does Not See A New Tool
 
@@ -751,6 +803,9 @@ Expected shape:
 - `local_service` has no local auth because it is intended to be loopback-only.
 - Wake-word quality depends on the configured openWakeWord model and local microphone conditions.
 - macOS Accessibility permission must be granted by the user before `inspect_ui` and `interact_ui` can work.
+- Working document and browser URL context depends on what each app exposes through macOS Accessibility.
+- Calendar context is read-only and empty until the user grants full Calendar access.
+- The POC reference resolver supports explicit aliases plus current file, page, app, and project references, not a complete personal knowledge graph.
 - Some apps expose incomplete Accessibility trees, so AppleScript or a direct process command can be a fallback.
 - Weather and other unsupported services use reusable web and app primitives until a dedicated provider is justified.
 
@@ -763,7 +818,6 @@ Expected shape:
 - Keep tool descriptions precise. The LLM sees those descriptions and uses them
   to decide when to call the tool.
 - Keep `ToolResult.spoken` concise because it is usually spoken aloud.
-- Include structured details in `ToolResult.data` for debugging and possible
-  future UI use.
+- Include structured details in `ToolResult.data` so the HUD can render useful results without parsing spoken text.
 - Restart the right component for the kind of change you made; most iteration
   does not require redeploying the cloud agent.

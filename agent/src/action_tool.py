@@ -10,6 +10,7 @@ from action_catalog import ActionCatalog
 from capability_tool import RpcCall, _decode
 
 PrimitiveCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+EventSink = Callable[[str, dict[str, Any]], None]
 
 
 def _primitive_result(envelope: dict[str, Any]) -> str:
@@ -37,6 +38,7 @@ def build_action_tool(
     rpc_call: RpcCall,
     call_primitive: PrimitiveCall,
     catalog: ActionCatalog,
+    event_sink: EventSink | None = None,
 ):
     available = catalog.tool_summary()
 
@@ -69,12 +71,43 @@ def build_action_tool(
         if manifest.get("permission") != "read_only":
             context.disallow_interruptions()
 
+        if event_sink:
+            event_sink(
+                "action_started",
+                {
+                    "action": action,
+                    "arguments": normalized,
+                    "description": manifest.get("description") or action,
+                },
+            )
+
         target = manifest["target"]
         if target.get("kind") == "primitive":
             tool_name = str(target.get("tool") or "")
             if not tool_name:
+                if event_sink:
+                    event_sink(
+                        "action_completed",
+                        {
+                            "action": action,
+                            "ok": False,
+                            "error": f"{action} has no primitive target.",
+                        },
+                    )
                 return f"{action} has no primitive target."
-            return _primitive_result(await call_primitive(tool_name, normalized))
+            envelope = await call_primitive(tool_name, normalized)
+            if event_sink:
+                event_sink(
+                    "action_completed",
+                    {
+                        "action": action,
+                        "ok": bool(envelope.get("ok")),
+                        "result": envelope.get("data"),
+                        "message": envelope.get("spoken"),
+                        "error": envelope.get("error"),
+                    },
+                )
+            return _primitive_result(envelope)
 
         response = _decode(
             await rpc_call(
@@ -90,11 +123,30 @@ def build_action_tool(
             )
         )
         if not response.get("ok"):
+            if event_sink:
+                event_sink(
+                    "action_completed",
+                    {
+                        "action": action,
+                        "ok": False,
+                        "error": response.get("error") or f"{action} failed.",
+                    },
+                )
             return json.dumps(
                 {
                     "error": response.get("error") or f"{action} failed.",
                     "attempts": response.get("attempts"),
                 }
+            )
+        if event_sink:
+            event_sink(
+                "action_completed",
+                {
+                    "action": action,
+                    "ok": True,
+                    "provider": response.get("provider"),
+                    "result": response.get("result"),
+                },
             )
         return json.dumps(
             {

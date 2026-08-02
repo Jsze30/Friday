@@ -34,6 +34,7 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSMicrophoneUsageDescription: "Friday listens for the wake word and your spoken requests."
         NSLocationWhenInUseUsageDescription: "Friday uses your location to answer location-aware requests."
+        NSCalendarsFullAccessUsageDescription: "Friday uses upcoming events to understand your schedule and meeting references."
         NSHighResolutionCapable: true
     entitlements:
       path: Friday/Friday.entitlements

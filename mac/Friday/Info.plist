@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Friday uses upcoming events to understand your schedule and meeting references.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Friday uses your location to answer location-aware requests.</string>
 	<key>NSMicrophoneUsageDescription</key>

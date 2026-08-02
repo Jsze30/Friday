@@ -31,9 +31,11 @@ class Settings(BaseSettings):
         alias="SPOTIFY_REDIRECT_URI",
     )
 
-    # openWakeWord: either a pretrained model name ("hey_jarvis", "alexa",
-    # "hey_mycroft", "hey_rhasspy") or a path to a custom-trained .onnx.
-    wake_model: str = Field(default="hey_jarvis", alias="FRIDAY_WAKE_MODEL")
+    # openWakeWord accepts a pretrained model name or a custom ONNX/TFLite path.
+    wake_model: str = Field(
+        default="models/hey_friday.onnx",
+        alias="FRIDAY_WAKE_MODEL",
+    )
     wake_threshold: float = Field(default=0.5, alias="FRIDAY_WAKE_THRESHOLD")
     wake_debounce_ms: int = Field(default=1500, alias="FRIDAY_WAKE_DEBOUNCE_MS")
 

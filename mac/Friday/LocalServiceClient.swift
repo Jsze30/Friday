@@ -94,6 +94,24 @@ actor LocalServiceClient {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    func resolveContext(query: String, working: [String: Any]) async throws -> String {
+        var req = URLRequest(url: baseURL.appendingPathComponent("context/resolve"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(
+            withJSONObject: ["query": query, "working": working]
+        )
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(
+                domain: "Friday",
+                code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "context resolution failed"]
+            )
+        }
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
     func resumeWake() async throws {
         var req = URLRequest(url: baseURL.appendingPathComponent("wake/resume"))
         req.httpMethod = "POST"

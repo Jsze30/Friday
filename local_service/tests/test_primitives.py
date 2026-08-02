@@ -20,8 +20,11 @@ class PrimitiveToolTests(unittest.TestCase):
             {
                 "create_directory",
                 "fetch_url",
+                "forget_reference",
                 "inspect_path",
+                "list_reference_memories",
                 "move_path",
+                "remember_reference",
                 "run_applescript",
                 "run_process",
                 "search_files",

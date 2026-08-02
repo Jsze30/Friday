@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from . import capabilities, profile, runtime, tools
+from .context_store import store as context_store
 from .events import bus
 from .tokens import mint_token
 
@@ -62,6 +63,22 @@ async def capabilities_execute(payload: dict) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
     return await capabilities.execute(payload)
+
+
+@router.post("/context/resolve")
+async def context_resolve(payload: dict) -> dict[str, object]:
+    query = payload.get("query") or ""
+    working = payload.get("working") or {}
+    if not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="query must be a string")
+    if not isinstance(working, dict):
+        raise HTTPException(status_code=400, detail="working must be an object")
+    return {"ok": True, **context_store.resolve(query, working)}
+
+
+@router.get("/context/references")
+async def context_references() -> dict[str, object]:
+    return {"ok": True, "memories": context_store.list_references()}
 
 
 @router.websocket("/wake/audio")

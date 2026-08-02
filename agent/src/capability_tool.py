@@ -9,6 +9,7 @@ from typing import Any
 from livekit.agents import RunContext, function_tool, llm
 
 RpcCall = Callable[[str, str], Awaitable[str | None]]
+EventSink = Callable[[str, dict[str, Any]], None]
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 FAST_PATH_SECONDS = 0.8
 FAST_POLL_SECONDS = 0.2
@@ -50,6 +51,7 @@ def _terminal_result(status: dict[str, Any]) -> str:
 def build_capability_tool(
     rpc_call: RpcCall,
     capabilities: list[str] | None = None,
+    event_sink: EventSink | None = None,
 ):
     supported = ", ".join(
         capabilities or ["files", "research", "web", "coding", "music"]
@@ -81,6 +83,12 @@ def build_capability_tool(
         if not isinstance(inputs, dict):
             return "inputs_json must contain a JSON object."
 
+        if event_sink:
+            event_sink(
+                "capability_started",
+                {"capability": capability, "goal": goal},
+            )
+
         started = _decode(
             await rpc_call(
                 "capability_call",
@@ -95,9 +103,27 @@ def build_capability_tool(
             )
         )
         if not started.get("ok"):
+            if event_sink:
+                event_sink(
+                    "capability_completed",
+                    {
+                        "capability": capability,
+                        "ok": False,
+                        "error": started.get("error"),
+                    },
+                )
             return str(started.get("error") or "Could not start the capability.")
         task_id = str(started.get("taskId") or "")
         if not task_id:
+            if event_sink:
+                event_sink(
+                    "capability_completed",
+                    {
+                        "capability": capability,
+                        "ok": False,
+                        "error": "The local capability runner did not return a task ID.",
+                    },
+                )
             return "The local capability runner did not return a task ID."
 
         last_sequence = 0
@@ -121,6 +147,17 @@ def build_capability_tool(
             while time.monotonic() < fast_deadline:
                 status = await poll()
                 if status.get("status") in TERMINAL_STATUSES:
+                    if event_sink:
+                        event_sink(
+                            "capability_completed",
+                            {
+                                "capability": capability,
+                                "ok": status.get("status") == "succeeded",
+                                "status": status.get("status"),
+                                "result": status.get("result"),
+                                "error": status.get("error"),
+                            },
+                        )
                     return _terminal_result(status)
                 await asyncio.sleep(FAST_POLL_SECONDS)
 
@@ -136,10 +173,20 @@ def build_capability_tool(
                 while True:
                     status = await poll()
                     if not status.get("ok") and not status.get("status"):
-                        return str(
+                        error = str(
                             status.get("error")
                             or "The capability runner stopped responding."
                         )
+                        if event_sink:
+                            event_sink(
+                                "capability_completed",
+                                {
+                                    "capability": capability,
+                                    "ok": False,
+                                    "error": error,
+                                },
+                            )
+                        return error
                     events = status.get("events") or []
                     if events:
                         last_sequence = max(
@@ -148,12 +195,32 @@ def build_capability_tool(
                             if isinstance(event, dict)
                         )
                         for event in events:
+                            if event_sink and isinstance(event, dict):
+                                event_sink(
+                                    "capability_progress",
+                                    {
+                                        "capability": capability,
+                                        "phase": event.get("phase"),
+                                        "message": event.get("message"),
+                                    },
+                                )
                             if (
                                 isinstance(event, dict)
                                 and event.get("phase") == "fallback"
                             ):
                                 await context.update(str(event.get("message")))
                     if status.get("status") in TERMINAL_STATUSES:
+                        if event_sink:
+                            event_sink(
+                                "capability_completed",
+                                {
+                                    "capability": capability,
+                                    "ok": status.get("status") == "succeeded",
+                                    "status": status.get("status"),
+                                    "result": status.get("result"),
+                                    "error": status.get("error"),
+                                },
+                            )
                         return _terminal_result(status)
                     await asyncio.sleep(BACKGROUND_POLL_SECONDS)
         except asyncio.CancelledError:
@@ -161,6 +228,15 @@ def build_capability_tool(
                 "capability_call",
                 json.dumps({"operation": "cancel", "taskId": task_id}),
             )
+            if event_sink:
+                event_sink(
+                    "capability_completed",
+                    {
+                        "capability": capability,
+                        "ok": False,
+                        "status": "cancelled",
+                    },
+                )
             raise
 
     return run_capability

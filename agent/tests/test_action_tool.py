@@ -19,6 +19,7 @@ class FakeRunContext:
 class ActionToolTests(unittest.TestCase):
     def test_runs_primitive_action_immediately(self) -> None:
         primitive_calls: list[tuple[str, dict]] = []
+        events: list[tuple[str, dict]] = []
 
         async def rpc_call(_method: str, _payload: str) -> str:
             raise AssertionError("primitive action should not call capability RPC")
@@ -49,7 +50,12 @@ class ActionToolTests(unittest.TestCase):
             ]
         )
         context = FakeRunContext()
-        tool = build_action_tool(rpc_call, call_primitive, catalog)
+        tool = build_action_tool(
+            rpc_call,
+            call_primitive,
+            catalog,
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
 
         raw = asyncio.run(
             tool(
@@ -62,6 +68,11 @@ class ActionToolTests(unittest.TestCase):
         self.assertEqual(primitive_calls, [("open_app", {"app": "Spotify"})])
         self.assertTrue(context.interruptions_disallowed)
         self.assertEqual(json.loads(raw)["message"], "Opened Spotify.")
+        self.assertEqual(
+            [event for event, _ in events],
+            ["action_started", "action_completed"],
+        )
+        self.assertTrue(events[1][1]["ok"])
 
     def test_runs_provider_action_through_one_shared_rpc(self) -> None:
         rpc_calls: list[tuple[str, dict]] = []
