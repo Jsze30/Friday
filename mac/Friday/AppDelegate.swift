@@ -10,17 +10,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuBar = MenuBarController()
         hud = HUDPanelController()
-        BootCoordinator.shared.start()
+        let isHUDPreview = CommandLine.arguments.contains("--preview-hud")
+        if isHUDPreview {
+            AppState.shared.set(.sleeping)
+        } else {
+            BootCoordinator.shared.start()
+        }
 
-        if CommandLine.arguments.contains("--preview-hud") {
+        if isHUDPreview {
             Task { @MainActor in
-                for _ in 0..<120 {
-                    if AppState.shared.state == .sleeping {
-                        AppState.shared.runHUDPreview()
-                        return
-                    }
-                    try? await Task.sleep(for: .milliseconds(250))
-                }
+                try? await Task.sleep(for: .milliseconds(250))
                 AppState.shared.runHUDPreview()
             }
         }

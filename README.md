@@ -22,7 +22,7 @@ The cloud agent can only reach them through LiveKit RPC calls that are brokered 
 - Executes requested actions immediately without confirmation prompts while keeping path and network safeguards.
 - Supplies a live human-readable Core Location place and a fresh local clock as ambient context.
 - Stores stable profile facts locally and injects them into the agent prompt.
-- Shows a non-activating HUD with live user text, streamed Friday text, state, resolved references, action progress, and end-to-end latency.
+- Shows a non-activating visual HUD whose animated orb reflects Friday's current state.
 - Reads a small local working-context snapshot containing the frontmost app, focused window or document, active URL when available, and upcoming calendar events.
 - Maintains an event-driven computer-perception cache containing accessible text, selected content, controls, and a short-lived active-window image.
 - Runs OCR locally with Apple Vision and sends one compressed active-window image to OpenAI only for questions that require visual reasoning.
@@ -255,22 +255,22 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 3. Swift receives the event over `WS /events`.
 4. The HUD appears immediately and Swift sends the two-second pre-roll before calling the agent RPC `activate_turn`.
 5. The agent enables its audio gate and listens while the published microphone track remains warm.
-6. Partial and final user transcripts stream to the HUD.
+6. Partial and final user transcripts stream to the Mac app state while the visual HUD reflects the listening state.
 7. Before the reply, the agent calls `get_turn_context`, and Swift combines the current Mac and calendar snapshot with locally saved reference memories.
-8. For a context-dependent request, the agent injects that bounded context only into the current inference and publishes any resolved references to the HUD.
+8. For a context-dependent request, the agent injects that bounded context only into the current inference and publishes any resolved references to the Mac app.
 9. Agent state changes are sent back to Swift with `set_assistant_state`.
 10. For a clear registered command without a contextual reference, the local router selects the exact action without another model decision.
 11. The agent emits a `run_action` call directly with the exact catalog-produced arguments, skipping the first model call, and the action runs synchronously through its primitive or fastest available provider.
 12. If a command contains a resolved phrase such as `the project`, the fast model receives the canonical target and selects the correct action instead of running a misleading raw text route.
-13. Action start and completion events appear in the HUD.
+13. Action start and completion events update the HUD's visual state.
 14. For intelligent or multi-step work, the LLM calls `run_capability`.
 15. The agent starts a local capability task through `capability_call`.
-16. Fast tasks return immediately, while slow tasks continue in the background and publish progress to the HUD.
+16. Fast tasks return immediately, while slow tasks continue in the background and publish progress to the Mac app.
 17. For direct primitives, the LLM uses `tool_search` and `call_tool`, then the cloud agent performs a `tool_call` RPC to Swift.
 18. Swift forwards action, capability, and primitive calls to their corresponding localhost APIs.
 19. `local_service` returns structured results with provider traces or primitive data.
-20. Friday's response text streams to the HUD while the agent speaks it.
-21. LiveKit's per-turn metrics publish the measured end-of-speech-to-first-response latency to the HUD.
+20. Friday's response text streams to the Mac app while the agent speaks it.
+21. LiveKit's per-turn metrics publish the measured end-of-speech-to-first-response latency to the Mac app.
 22. After speaking, the agent enters a 5 second follow-up window.
 23. If no follow-up input arrives, the agent disables its audio gate, calls `return_to_sleep`, and the HUD fades away.
 
@@ -279,9 +279,9 @@ Startup is coordinated by `mac/Friday/BootCoordinator.swift`:
 The personal context system is a local-first vertical slice across the Mac app, local service, and cloud agent.
 Future app integrations can publish normalized observations without changing retrieval or agent routing.
 
-The HUD is a 440-point non-activating panel positioned below the menu bar on the display containing the pointer.
+The HUD is a 150-point non-activating panel positioned below the menu bar on the display containing the pointer.
 It remains hidden while Friday sleeps, appears on wake, never becomes the key window, ignores pointer events, and fades after the follow-up window.
-Its compact states show listening motion, partial user text, thinking or action detail, streamed assistant text, the highest-value resolved reference, a result summary, and measured end-to-end latency.
+Its animated orb changes motion and color to reflect Friday's current state without displaying text.
 
 The working-context snapshot currently contains:
 
@@ -319,16 +319,16 @@ Choose `Memories…` from Friday's menu bar to inspect or delete durable memorie
 Friday can be quit with Command-Q, from its Dock menu, from the standard application menu, or from its menu-bar control.
 
 To preview the HUD without speaking, open Friday's menu bar menu and choose `Preview HUD`.
-The preview walks through listening, context resolution, acting, speaking, and latency states without running a real action.
+The preview walks through listening, thinking, acting, speaking, and error visuals without running a real action.
 
 After rebuilding the Mac app, restarting the local service, and deploying the agent, an end-to-end smoke test is:
 
 1. Open a file in the Friday repository.
-2. Say `Friday, explain this file` and confirm the HUD shows the active document resolution.
+2. Say `Friday, explain this file` and confirm the response uses the active document context.
 3. Say `Friday, when I say the project, I mean Friday` and confirm the memory action completes without confirmation.
 4. Restart Friday and say `Friday, open the project` to confirm the saved reference survives.
 5. Ask about an upcoming event and confirm the response uses Calendar only after permission is granted.
-6. Confirm the HUD displays the measured first-response latency after Friday speaks.
+6. Confirm the latency log records the measured first-response latency after Friday speaks.
 
 ## Action System
 

@@ -8,10 +8,11 @@ final class HUDPanelController {
     private let panel: HUDPanel
     private var cancellables = Set<AnyCancellable>()
     private var hideTask: Task<Void, Never>?
+    private var isPresented = false
 
     init() {
         panel = HUDPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 150),
+            contentRect: NSRect(x: 0, y: 0, width: 150, height: 150),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -46,6 +47,8 @@ final class HUDPanelController {
         if model.shouldShowHUD {
             hideTask?.cancel()
             resizeAndPosition(height: model.preferredHUDHeight)
+            guard !isPresented else { return }
+            isPresented = true
             if !panel.isVisible {
                 panel.orderFrontRegardless()
             }
@@ -57,6 +60,8 @@ final class HUDPanelController {
             return
         }
 
+        guard isPresented else { return }
+        isPresented = false
         hideTask?.cancel()
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(620))
@@ -65,8 +70,11 @@ final class HUDPanelController {
                 context.duration = 0.16
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 self.panel.animator().alphaValue = 0
-            }, completionHandler: { [weak panel] in
-                Task { @MainActor in panel?.orderOut(nil) }
+            }, completionHandler: { [weak self] in
+                Task { @MainActor in
+                    guard let self, !self.isPresented else { return }
+                    self.panel.orderOut(nil)
+                }
             })
         }
     }
@@ -74,7 +82,7 @@ final class HUDPanelController {
     private func resizeAndPosition(height: CGFloat) {
         let oldFrame = panel.frame
         let screen = activeScreen()
-        let width: CGFloat = 380
+        let width: CGFloat = 150
         let x = screen.visibleFrame.maxX - width - 16
         let y = screen.visibleFrame.maxY - height - 10
         let frame = NSRect(x: x, y: y, width: width, height: height)
