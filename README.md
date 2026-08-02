@@ -355,6 +355,12 @@ An action manifest contains:
 At room startup, Friday merges provider actions with native Mac primitive actions and compiles the routes in memory.
 A clear phrase such as `pause the music` becomes `music.pause` locally, without a separate classification model call.
 The shared executor validates every argument, runs the action synchronously, and preserves provider attempts for debugging and fallback.
+Clear action routes remain deterministic even when unrelated working-context references are present.
+Only an action argument such as `it`, `that app`, or a phrase resolved by the context layer is sent back to the model for interpretation.
+
+Actions may also declare or enforce a success contract.
+Opening an application succeeds only when the resolved bundle becomes frontmost, opening a known website succeeds only when it appears in the required browser, and Spotify play or pause succeeds only when Spotify reports the requested playback state.
+Friday retries Spotify playback once when the API accepts a command without producing the requested state.
 
 Spotify currently declares track, playback, queue, shuffle, repeat, volume, and playlist actions.
 The native Mac layer declares app, browser URL, and Core Audio actions.
@@ -432,9 +438,12 @@ Requested writes execute immediately through bounded primitives.
 The computer provider keeps the complete user goal while it works.
 It refreshes Accessibility state after every meaningful action, rejects stale element references, waits for application launches, and verifies the resulting UI before finishing.
 Common goals such as `open Minecraft and press Play` use a deterministic generic open-and-press path without a planning-model call.
+Application aliases resolve to stable bundle identifiers before launch, so `Minecraft` resolves to Minecraft Launcher rather than relying on a model guess.
+Known website names resolve through declarative destination data and use `FRIDAY_PREFERRED_BROWSER` unless the user explicitly requests another browser.
 Unfamiliar goals use the configured computer model to choose one bounded next action at a time.
 If a requested control is not exposed through Accessibility, the provider can locate that one control in the current active-window image and click the grounded point.
 The provider does not contain Minecraft-specific or other app-specific command branches.
+Built-in and configured identities are declarative data used by the generic app and website actions.
 
 ## Primitive System
 
@@ -623,6 +632,10 @@ Optional:
 | `FRIDAY_ALLOWED_PATHS` | empty | Extra allowed file roots separated by the platform path separator. |
 | `FRIDAY_CODE_AGENT` | auto-detected | Executable path or command name for the read-only coding specialist. |
 | `FRIDAY_CAPABILITY_PROVIDERS_JSON` | `[]` | JSON array of trusted external capability providers. |
+| `FRIDAY_PREFERRED_BROWSER` | `Arc` | Browser used by website actions unless the user explicitly requests another browser. |
+| `FRIDAY_PREFERRED_MUSIC_PROVIDER` | `Spotify` | Music provider reserved for deterministic playback actions. |
+| `FRIDAY_APP_ALIASES_JSON` | `{}` | JSON mapping of additional spoken app aliases to application names or bundle identifiers. |
+| `FRIDAY_WEB_DESTINATIONS_JSON` | `{}` | JSON mapping of additional spoken website names to exact URLs. |
 | `FRIDAY_VISION_MODEL` | `gpt-5.4-mini` | Fast OpenAI model used first for visual screen questions and UI grounding. |
 | `FRIDAY_VISION_REASONING_EFFORT` | `none` | Reasoning effort used by the fast visual model. |
 | `FRIDAY_VISION_ESCALATION_MODEL` | `gpt-5.6-terra` | Stronger visual model used when grounding or verification is ambiguous or invalid. |

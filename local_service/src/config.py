@@ -63,6 +63,22 @@ class Settings(BaseSettings):
         default="low",
         alias="FRIDAY_COMPUTER_ESCALATION_REASONING_EFFORT",
     )
+    preferred_browser: str = Field(
+        default="Arc",
+        alias="FRIDAY_PREFERRED_BROWSER",
+    )
+    preferred_music_provider: str = Field(
+        default="Spotify",
+        alias="FRIDAY_PREFERRED_MUSIC_PROVIDER",
+    )
+    app_aliases: dict[str, str] = Field(
+        default_factory=dict,
+        alias="FRIDAY_APP_ALIASES_JSON",
+    )
+    web_destinations: dict[str, str] = Field(
+        default_factory=dict,
+        alias="FRIDAY_WEB_DESTINATIONS_JSON",
+    )
     cloud_visual_analysis: bool = Field(
         default=True,
         alias="FRIDAY_CLOUD_VISUAL_ANALYSIS",

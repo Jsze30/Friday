@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from action_catalog import ActionCatalog
+from stop_command import is_stop_command
 
 ModelRoute = Literal["fast", "complex"]
 
@@ -90,6 +91,12 @@ def deterministic_tool_route(
     action_catalog: ActionCatalog | None = None,
 ) -> DeterministicToolRoute | None:
     """Map a clear command through provider-declared action routes."""
+    if is_stop_command(text):
+        return DeterministicToolRoute(
+            tool_name="stop_current_work",
+            arguments={},
+            reason="explicit stop command",
+        )
     if action_catalog is None:
         return None
     match = action_catalog.match(text)

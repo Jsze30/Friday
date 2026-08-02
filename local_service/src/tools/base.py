@@ -91,10 +91,26 @@ def tool(
 
 async def execute(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if name == "__list__":
+        manifests = [tool_def.manifest() for tool_def in REGISTRY.values()]
+        cursor = arguments.get("cursor")
+        limit = arguments.get("limit")
+        if cursor is None and limit is None:
+            selected = manifests
+            next_cursor = None
+        else:
+            start = max(0, cursor) if isinstance(cursor, int) else 0
+            page_size = min(10, max(1, limit)) if isinstance(limit, int) else 3
+            end = min(len(manifests), start + page_size)
+            selected = manifests[start:end]
+            next_cursor = end if end < len(manifests) else None
         return {
             "ok": True,
             "spoken": None,
-            "data": {"tools": [t.manifest() for t in REGISTRY.values()]},
+            "data": {
+                "tools": selected,
+                "nextCursor": next_cursor,
+                "total": len(manifests),
+            },
             "error": None,
         }
     tool_def = REGISTRY.get(name)

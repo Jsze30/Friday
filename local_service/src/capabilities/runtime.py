@@ -82,6 +82,7 @@ class CapabilityRuntime:
     def __init__(self, broker: CapabilityBroker) -> None:
         self._broker = broker
         self._tasks: dict[str, CapabilityTask] = {}
+        self._active_actions: set[asyncio.Task[Any]] = set()
 
     async def catalog(self) -> dict[str, Any]:
         return {"ok": True, **(await self._broker.catalog())}
@@ -132,6 +133,9 @@ class CapabilityRuntime:
         async def progress(_phase: str, _message: str) -> None:
             return None
 
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._active_actions.add(current_task)
         try:
             result, attempts, provider = await self._broker.execute_action(
                 action_id,
@@ -147,13 +151,17 @@ class CapabilityRuntime:
             }
         except ProviderFailed as error:
             return {"ok": False, "error": str(error)}
-        return {
-            "ok": True,
-            "status": "succeeded",
-            "provider": provider,
-            "result": result.to_dict(),
-            "attempts": [attempt.to_dict() for attempt in attempts],
-        }
+        else:
+            return {
+                "ok": True,
+                "status": "succeeded",
+                "provider": provider,
+                "result": result.to_dict(),
+                "attempts": [attempt.to_dict() for attempt in attempts],
+            }
+        finally:
+            if current_task is not None:
+                self._active_actions.discard(current_task)
 
     async def status(self, task_id: str, since: int = 0) -> dict[str, Any]:
         record = self._tasks.get(task_id)
@@ -173,6 +181,37 @@ class CapabilityRuntime:
                 pass
         return record.snapshot()
 
+    async def cancel_all(self) -> dict[str, Any]:
+        background = [
+            record
+            for record in self._tasks.values()
+            if record.runner and not record.runner.done()
+        ]
+        foreground = [task for task in self._active_actions if not task.done()]
+        for record in background:
+            assert record.runner is not None
+            record.runner.cancel()
+        for task in foreground:
+            task.cancel()
+        awaitables = [
+            *(record.runner for record in background if record.runner is not None),
+            *foreground,
+        ]
+        if awaitables:
+            await asyncio.gather(*awaitables, return_exceptions=True)
+        log.info(
+            "cancelled active work background=%d actions=%d",
+            len(background),
+            len(foreground),
+        )
+        return {
+            "ok": True,
+            "status": "cancelled",
+            "cancelledCount": len(background) + len(foreground),
+            "backgroundTaskIds": [record.task_id for record in background],
+            "actionCount": len(foreground),
+        }
+
     async def shutdown(self) -> None:
         running = [
             record.runner
@@ -181,8 +220,13 @@ class CapabilityRuntime:
         ]
         for runner in running:
             runner.cancel()
+        actions = [task for task in self._active_actions if not task.done()]
+        for task in actions:
+            task.cancel()
         if running:
             await asyncio.gather(*running, return_exceptions=True)
+        if actions:
+            await asyncio.gather(*actions, return_exceptions=True)
         await self._broker.shutdown()
 
     async def _run(self, record: CapabilityTask) -> None:

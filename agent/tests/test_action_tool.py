@@ -66,7 +66,7 @@ class ActionToolTests(unittest.TestCase):
         )
 
         self.assertEqual(primitive_calls, [("open_app", {"app": "Spotify"})])
-        self.assertTrue(context.interruptions_disallowed)
+        self.assertFalse(context.interruptions_disallowed)
         self.assertEqual(json.loads(raw)["message"], "Opened Spotify.")
         self.assertEqual(
             [event for event, _ in events],
@@ -121,7 +121,7 @@ class ActionToolTests(unittest.TestCase):
         self.assertEqual(rpc_calls[0][0], "capability_call")
         self.assertEqual(rpc_calls[0][1]["operation"], "action")
         self.assertEqual(rpc_calls[0][1]["action"], "music.pause")
-        self.assertTrue(context.interruptions_disallowed)
+        self.assertFalse(context.interruptions_disallowed)
         self.assertEqual(json.loads(raw)["provider"], "spotify-web-api")
 
 

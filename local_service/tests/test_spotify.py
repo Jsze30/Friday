@@ -67,6 +67,9 @@ class FakeSpotifyClient:
             "url": "https://open.spotify.com/track/123",
         }
 
+    async def pause(self) -> None:
+        return None
+
     async def list_playlists(
         self,
         *,
@@ -284,6 +287,61 @@ class SpotifyTests(unittest.IsolatedAsyncioTestCase):
             ["Pink + White by Frank Ocean"],
         )
         self.assertIn("Frank Ocean", result.summary)
+        self.assertTrue(result.data["verified"])
+
+    async def test_play_retries_when_spotify_does_not_confirm_playback(self) -> None:
+        class RetryClient(FakeSpotifyClient):
+            async def playback(self) -> dict:
+                value = await super().playback()
+                value["is_playing"] = len(self.play_queries) > 1
+                return value
+
+        client = RetryClient()
+        provider = SpotifyProvider(client=client)  # type: ignore[arg-type]
+        phases: list[str] = []
+
+        async def progress(phase: str, _message: str) -> None:
+            phases.append(phase)
+
+        with patch("src.capabilities.spotify.PLAYBACK_VERIFY_ATTEMPTS", 1):
+            result = await provider.execute(
+                CapabilityRequest(
+                    capability="music",
+                    goal="Play Pink and White by Frank Ocean",
+                    inputs={"action": "play", "query": "Pink + White"},
+                    permission="low_risk_write",
+                ),
+                progress,
+            )
+
+        self.assertEqual(client.play_queries, ["Pink + White", "Pink + White"])
+        self.assertIn("retry", phases)
+        self.assertTrue(result.data["verified"])
+
+    async def test_pause_requires_spotify_to_report_paused(self) -> None:
+        class PausedClient(FakeSpotifyClient):
+            async def playback(self) -> dict:
+                value = await super().playback()
+                value["is_playing"] = False
+                return value
+
+        provider = SpotifyProvider(client=PausedClient())  # type: ignore[arg-type]
+
+        async def progress(_phase: str, _message: str) -> None:
+            return None
+
+        result = await provider.execute(
+            CapabilityRequest(
+                capability="music",
+                goal="Pause the music",
+                inputs={"action": "pause"},
+                permission="low_risk_write",
+            ),
+            progress,
+        )
+
+        self.assertTrue(result.data["verified"])
+        self.assertFalse(result.data["playback"]["is_playing"])
 
     async def test_status_returns_current_track(self) -> None:
         provider = SpotifyProvider(

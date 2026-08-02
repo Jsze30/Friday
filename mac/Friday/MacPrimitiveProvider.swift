@@ -720,7 +720,7 @@ final class MacPrimitiveProvider {
         if let running = findRunningApplication(requested) {
             if running.isActive {
                 return envelope(
-                    spoken: "(running.localizedName ?? requested) is already active.",
+                    spoken: "\(running.localizedName ?? requested) is already active.",
                     data: [
                         "name": running.localizedName ?? requested,
                         "bundleId": running.bundleIdentifier ?? "",
@@ -730,7 +730,7 @@ final class MacPrimitiveProvider {
                 )
             }
             guard let applicationURL = running.bundleURL else {
-                return envelope(ok: false, error: "could not resolve (requested)")
+                return envelope(ok: false, error: "could not resolve \(requested)")
             }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
@@ -741,7 +741,7 @@ final class MacPrimitiveProvider {
                     configuration: configuration
                 )
                 return envelope(
-                    spoken: "Brought (application.localizedName ?? requested) to the front.",
+                    spoken: "Brought \(application.localizedName ?? requested) to the front.",
                     data: [
                         "name": application.localizedName ?? requested,
                         "bundleId": application.bundleIdentifier ?? "",
@@ -752,7 +752,7 @@ final class MacPrimitiveProvider {
             } catch {
                 return envelope(
                     ok: false,
-                    error: "could not activate (requested): (error.localizedDescription)"
+                    error: "could not activate \(requested): \(error.localizedDescription)"
                 )
             }
         }
@@ -772,7 +772,7 @@ final class MacPrimitiveProvider {
                 configuration: configuration
             )
             return envelope(
-                spoken: "Opened (application.localizedName ?? url.deletingPathExtension().lastPathComponent).",
+                spoken: "Opened \(application.localizedName ?? url.deletingPathExtension().lastPathComponent).",
                 data: [
                     "path": url.path,
                     "bundleId": application.bundleIdentifier ?? "",
@@ -782,7 +782,7 @@ final class MacPrimitiveProvider {
         } catch {
             return envelope(
                 ok: false,
-                error: "could not open (requested): (error.localizedDescription)"
+                error: "could not open \(requested): \(error.localizedDescription)"
             )
         }
     }

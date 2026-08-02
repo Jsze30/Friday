@@ -248,6 +248,13 @@ Integrations declare actions, parameters, matching routes, permissions, latency,
 The central router compiles those declarations and does not contain provider-specific command branches.
 
 A clear action should skip the first model call, execute through the fastest available provider, and return a concise result.
+An action should own its routing policy and success contract rather than allowing a planner to substitute a different provider or application.
+For example, a website action resolves the destination, applies the preferred browser, opens the URL, and verifies that the required browser became frontmost.
+An application action resolves spoken aliases to stable bundle identifiers and verifies focus.
+A music action uses the preferred music API and verifies the resulting playback state.
+
+App aliases, website destinations, and provider preferences should be declarative data.
+Adding another alias or destination should not require another planner branch or custom execution flow.
 
 ### Capabilities
 

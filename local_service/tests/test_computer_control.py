@@ -48,6 +48,8 @@ class FakeBridge:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.inspect_count = 0
         self.clicked = False
+        self.current_app = "Minecraft Launcher"
+        self.current_bundle_id = "com.mojang.minecraftlauncher"
 
     async def wait_until_connected(self, timeout: float = 0.75) -> bool:
         del timeout
@@ -63,6 +65,43 @@ class FakeBridge:
         del timeout
         payload = arguments or {}
         self.calls.append((tool, payload))
+        if tool == "open_app":
+            requested = str(payload.get("app") or "")
+            known = {
+                "com.mojang.minecraftlauncher": (
+                    "Minecraft Launcher",
+                    "com.mojang.minecraftlauncher",
+                ),
+                "Notes": ("Notes", "com.apple.Notes"),
+            }
+            self.current_app, self.current_bundle_id = known.get(
+                requested,
+                (requested, requested),
+            )
+            return envelope(
+                {
+                    "name": self.current_app,
+                    "bundleId": self.current_bundle_id,
+                    "activationRequested": True,
+                }
+            )
+        if tool == "open_url":
+            requested_browser = str(payload.get("browser") or "")
+            known_browsers = {
+                "company.thebrowser.Browser": ("Arc", "company.thebrowser.Browser"),
+                "com.google.Chrome": ("Google Chrome", "com.google.Chrome"),
+            }
+            self.current_app, self.current_bundle_id = known_browsers.get(
+                requested_browser,
+                (requested_browser, requested_browser),
+            )
+            return envelope(
+                {
+                    "url": payload.get("url"),
+                    "browser": self.current_app,
+                    "bundleId": self.current_bundle_id,
+                }
+            )
         if tool == "inspect_ui":
             self.inspect_count += 1
             return observation(changed=self.inspect_count > 1)
@@ -86,6 +125,8 @@ class FakeBridge:
                 {
                     "available": True,
                     "processId": 42,
+                    "app": self.current_app,
+                    "bundleId": self.current_bundle_id,
                     "visualFingerprint": fingerprint,
                 }
             )
@@ -116,6 +157,10 @@ class ComputerControlTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             _parse_open_and_press("Open Minecraft and press press Play"),
+            ("Minecraft", "Play"),
+        )
+        self.assertEqual(
+            _parse_open_and_press("Open Minecraft and press Play to launch the game"),
             ("Minecraft", "Play"),
         )
         self.assertEqual(_parse_press_control("Press Play"), "Play")
@@ -156,6 +201,7 @@ class ComputerControlTests(unittest.IsolatedAsyncioTestCase):
             [tool for tool, _arguments in bridge.calls],
             [
                 "open_app",
+                "observe_screen",
                 "inspect_ui",
                 "observe_screen",
                 "interact_ui",
@@ -163,6 +209,117 @@ class ComputerControlTests(unittest.IsolatedAsyncioTestCase):
                 "observe_screen",
             ],
         )
+
+    async def test_open_application_action_uses_exact_bundle_and_verifies_focus(
+        self,
+    ) -> None:
+        bridge = FakeBridge()
+        provider = ComputerControlProvider(bridge=bridge)
+
+        result = await provider.execute(
+            CapabilityRequest(
+                capability="computer",
+                goal="Open Minecraft",
+                inputs={"action": "open_application", "app": "Minecraft"},
+                permission="low_risk_write",
+            ),
+            no_progress,
+        )
+
+        self.assertEqual(
+            bridge.calls[0],
+            ("open_app", {"app": "com.mojang.minecraftlauncher"}),
+        )
+        self.assertTrue(result.data["verified"])
+        self.assertEqual(result.data["contract"], "application_frontmost")
+
+    async def test_open_youtube_action_enforces_arc_and_verifies_focus(self) -> None:
+        bridge = FakeBridge()
+        provider = ComputerControlProvider(bridge=bridge)
+
+        result = await provider.execute(
+            CapabilityRequest(
+                capability="computer",
+                goal="Open YouTube",
+                inputs={"action": "open_website", "destination": "YouTube"},
+                permission="low_risk_write",
+            ),
+            no_progress,
+        )
+
+        self.assertEqual(
+            bridge.calls[0],
+            (
+                "open_url",
+                {
+                    "url": "https://www.youtube.com",
+                    "browser": "company.thebrowser.Browser",
+                },
+            ),
+        )
+        self.assertEqual(result.data["browser"], "Arc")
+        self.assertTrue(result.data["verified"])
+        self.assertEqual(
+            result.data["contract"],
+            "website_open_in_required_browser",
+        )
+
+    async def test_generic_url_action_uses_the_same_verified_browser_contract(
+        self,
+    ) -> None:
+        bridge = FakeBridge()
+        provider = ComputerControlProvider(bridge=bridge)
+
+        result = await provider.execute(
+            CapabilityRequest(
+                capability="computer",
+                goal="Open example.com",
+                inputs={"action": "open_website", "destination": "example.com"},
+                permission="low_risk_write",
+            ),
+            no_progress,
+        )
+
+        self.assertEqual(
+            bridge.calls[0][1],
+            {
+                "url": "https://example.com",
+                "browser": "company.thebrowser.Browser",
+            },
+        )
+        self.assertTrue(result.data["verified"])
+
+    async def test_multistep_youtube_goal_opens_arc_before_model_planning(self) -> None:
+        bridge = FakeBridge()
+
+        async def planner(
+            _goal: str,
+            _observation: dict[str, Any],
+            history: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+            self.assertEqual(history[0]["action"], "open_url")
+            self.assertEqual(history[0]["arguments"]["browser"], "Arc")
+            return {
+                "action": "finish",
+                "arguments": {"summary": "YouTube is ready in Arc"},
+            }
+
+        provider = ComputerControlProvider(bridge=bridge, planner=planner)
+        result = await provider.execute(
+            CapabilityRequest(
+                capability="computer",
+                goal="Open YouTube and play the first video",
+                permission="low_risk_write",
+            ),
+            no_progress,
+        )
+
+        self.assertEqual(result.summary, "YouTube is ready in Arc")
+        open_urls = [
+            arguments for tool, arguments in bridge.calls if tool == "open_url"
+        ]
+        self.assertEqual(len(open_urls), 1)
+        self.assertEqual(open_urls[0]["browser"], "company.thebrowser.Browser")
 
     async def test_unfamiliar_goal_uses_planner_until_verified_finish(self) -> None:
         bridge = FakeBridge()
@@ -200,6 +357,7 @@ class ComputerControlTests(unittest.IsolatedAsyncioTestCase):
                 "inspect_ui",
                 "observe_screen",
                 "open_app",
+                "observe_screen",
                 "inspect_ui",
                 "observe_screen",
             ],
@@ -284,6 +442,10 @@ class ComputerControlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([payload["model"] for payload in payloads], ["gpt-5.4-mini"])
         self.assertEqual(payloads[0]["reasoning"], {"effort": "low"})
+        output_format = payloads[0]["text"]["format"]
+        self.assertEqual(output_format["type"], "json_schema")
+        self.assertTrue(output_format["strict"])
+        self.assertEqual(payloads[0]["max_output_tokens"], 800)
         self.assertEqual(decision["_plannerModel"], "gpt-5.4-mini")
         self.assertFalse(decision["_plannerEscalated"])
 

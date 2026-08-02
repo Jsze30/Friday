@@ -272,12 +272,16 @@ final class LiveKitController: NSObject, RoomDelegate {
 
         if tool == "__list__" {
             do {
-                let localJSON = try await LocalServiceClient(port: servicePort)
+                return try await LocalServiceClient(port: servicePort)
                     .executeTool(jsonPayload: jsonPayload)
-                return Self.mergeToolManifests(localJSON: localJSON)
             } catch {
                 return Self.errorEnvelope("could not load local primitives")
             }
+        }
+
+        if tool == "__list_native__" {
+            let arguments = payload["arguments"] as? [String: Any] ?? [:]
+            return Self.nativeManifestPage(arguments: arguments)
         }
 
         if MacPrimitiveProvider.shared.toolNames.contains(tool) {
@@ -292,16 +296,24 @@ final class LiveKitController: NSObject, RoomDelegate {
         }
     }
 
-    private static func mergeToolManifests(localJSON: String) -> String {
-        guard var envelope = decodeJSON(localJSON),
-              var data = envelope["data"] as? [String: Any],
-              var tools = data["tools"] as? [[String: Any]] else {
-            return errorEnvelope("local primitive manifest was invalid")
-        }
-        tools.append(contentsOf: MacPrimitiveProvider.shared.manifests)
-        data["tools"] = tools
-        envelope["data"] = data
-        return encodeJSON(envelope)
+    private static func nativeManifestPage(arguments: [String: Any]) -> String {
+        let manifests = MacPrimitiveProvider.shared.manifests
+        let cursor = max(0, arguments["cursor"] as? Int ?? 0)
+        let requestedLimit = arguments["limit"] as? Int ?? 3
+        let limit = min(10, max(1, requestedLimit))
+        let start = min(cursor, manifests.count)
+        let end = min(manifests.count, start + limit)
+        let nextCursor: Any = end < manifests.count ? end : NSNull()
+        return encodeJSON([
+            "ok": true,
+            "spoken": NSNull(),
+            "data": [
+                "tools": Array(manifests[start..<end]),
+                "nextCursor": nextCursor,
+                "total": manifests.count,
+            ],
+            "error": NSNull(),
+        ])
     }
 
     private nonisolated static func decodeJSON(_ value: String) -> [String: Any]? {

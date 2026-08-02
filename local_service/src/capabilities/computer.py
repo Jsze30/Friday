@@ -7,6 +7,14 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from ..action_policy import (
+    application_matches,
+    destination_action_routes,
+    destination_in_goal,
+    explicit_browser_in_goal,
+    resolve_application,
+    resolve_destination,
+)
 from ..config import settings
 from ..native_bridge import NativeBridgeError, native_bridge
 from ..openai_responses import ResponsesAPIError, extract_output_text, post, with_model
@@ -35,6 +43,7 @@ MIN_VISUAL_CONFIDENCE = 0.55
 MIN_VISUAL_HASH_DISTANCE = 4
 MIN_VISUAL_VERIFICATION_CONFIDENCE = 0.6
 MIN_PLANNER_CONFIDENCE = 0.65
+MAX_WAIT_ACTIONS = 2
 
 PLANNER_ACTIONS = {
     "open_app",
@@ -47,6 +56,68 @@ PLANNER_ACTIONS = {
     "wait",
     "finish",
     "fail",
+}
+
+PLANNER_ARGUMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "app": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "browser": {"type": ["string", "null"]},
+        "element_id": {"type": ["string", "null"]},
+        "action": {"type": ["string", "null"]},
+        "value": {"type": ["string", "null"]},
+        "key": {"type": ["string", "null"]},
+        "modifiers": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
+        "text": {"type": ["string", "null"]},
+        "delta_y": {"type": ["integer", "null"]},
+        "delta_x": {"type": ["integer", "null"]},
+        "target": {"type": ["string", "null"]},
+        "seconds": {"type": ["number", "null"]},
+        "summary": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+    },
+    "required": [
+        "app",
+        "url",
+        "browser",
+        "element_id",
+        "action",
+        "value",
+        "key",
+        "modifiers",
+        "text",
+        "delta_y",
+        "delta_x",
+        "target",
+        "seconds",
+        "summary",
+        "reason",
+    ],
+    "additionalProperties": False,
+}
+
+PLANNER_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "name": "friday_computer_step",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": sorted(PLANNER_ACTIONS),
+            },
+            "arguments": PLANNER_ARGUMENT_SCHEMA,
+            "expected": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": ["action", "arguments", "expected", "confidence"],
+        "additionalProperties": False,
+    },
 }
 
 OPEN_AND_PRESS_PATTERN = re.compile(
@@ -121,24 +192,36 @@ def _clean_label(value: Any) -> str:
     return re.sub(r"\s+button$", "", text, flags=re.IGNORECASE)
 
 
-def _parse_open_and_press(goal: str) -> tuple[str, str] | None:
-    match = OPEN_AND_PRESS_PATTERN.fullmatch(" ".join(goal.split()).strip(" .!?"))
-    if not match:
-        return None
-    app = _clean_label(match.group("app"))
-    label = _clean_label(match.group("label"))
+def _clean_requested_control(value: Any) -> str:
+    label = _clean_label(value)
     label = re.sub(
         r"^(?:press|click|select|choose|hit)\s+(?:the\s+)?",
         "",
         label,
         flags=re.IGNORECASE,
     )
+    return re.sub(
+        r"\s+(?:in\s+order\s+)?to\s+"
+        r"(?:launch|start|open|begin|play|continue|activate|load|show)\s+"
+        r"(?:the|this|that|my|your|a|an)\b.*$",
+        "",
+        label,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _parse_open_and_press(goal: str) -> tuple[str, str] | None:
+    match = OPEN_AND_PRESS_PATTERN.fullmatch(" ".join(goal.split()).strip(" .!?"))
+    if not match:
+        return None
+    app = _clean_label(match.group("app"))
+    label = _clean_requested_control(match.group("label"))
     return (app, label) if app and label else None
 
 
 def _parse_press_control(goal: str) -> str | None:
     match = PRESS_CONTROL_PATTERN.fullmatch(" ".join(goal.split()).strip(" .!?"))
-    return _clean_label(match.group("label")) if match else None
+    return _clean_requested_control(match.group("label")) if match else None
 
 
 def _normalized_app_name(value: Any) -> str:
@@ -313,6 +396,11 @@ def _parse_json_object(text: str) -> dict[str, Any]:
         raise ProviderFailed("the computer planner returned an unsupported action")
     if not isinstance(value.get("arguments"), dict):
         raise ProviderFailed("the computer planner returned invalid arguments")
+    value["arguments"] = {
+        key: argument
+        for key, argument in value["arguments"].items()
+        if argument is not None
+    }
     return value
 
 
@@ -345,6 +433,65 @@ class ComputerControlProvider(CapabilityProvider):
         ),
         capabilities=("computer",),
         actions=(
+            ActionDefinition(
+                action_id="browser.open_website",
+                capability="computer",
+                operation="open_website",
+                description=("Open a known website in the user's preferred browser."),
+                parameters=(
+                    ActionParameter(
+                        "destination",
+                        "string",
+                        "Known website name or URL.",
+                    ),
+                    ActionParameter(
+                        "browser",
+                        "string",
+                        "Optional explicitly requested browser.",
+                        required=False,
+                    ),
+                ),
+                routes=tuple(
+                    ActionRoute(pattern, {"destination": destination})
+                    for pattern, destination in destination_action_routes()
+                )
+                + (
+                    ActionRoute(
+                        r"(?:open|launch|visit|go\s+to)\s+"
+                        r"(?P<destination>(?:https?://|www\.)\S+|"
+                        r"[a-z0-9-]+(?:\.[a-z0-9-]+)+\S*)"
+                        r"(?:\s+(?:in|with|using)\s+"
+                        r"(?P<browser>[\w .'-]+))?"
+                    ),
+                ),
+                permission="low_risk_write",
+                latency_ms=350,
+                priority=250,
+            ),
+            ActionDefinition(
+                action_id="system.open_application",
+                capability="computer",
+                operation="open_application",
+                description=(
+                    "Open an installed Mac app and verify that it became frontmost."
+                ),
+                parameters=(
+                    ActionParameter(
+                        "app",
+                        "string",
+                        "Application name, alias, or bundle identifier.",
+                    ),
+                ),
+                routes=(
+                    ActionRoute(
+                        r"(?:open|launch|focus|activate)\s+(?:the\s+)?"
+                        r"(?P<app>[\w .'-]+)"
+                    ),
+                ),
+                permission="low_risk_write",
+                latency_ms=350,
+                priority=190,
+            ),
             ActionDefinition(
                 action_id="ui.press_control",
                 capability="computer",
@@ -394,12 +541,53 @@ class ComputerControlProvider(CapabilityProvider):
             return True
         return await self._bridge.wait_until_connected()
 
+    async def verify(
+        self,
+        request: CapabilityRequest,
+        result: CapabilityResult,
+    ) -> tuple[bool, str | None]:
+        if result.data.get("contract") and result.data.get("verified") is not True:
+            return False, f"computer action did not satisfy {result.data['contract']}"
+        return await super().verify(request, result)
+
     async def execute(
         self,
         request: CapabilityRequest,
         progress: ProgressCallback,
     ) -> CapabilityResult:
         operation = str(request.inputs.get("action") or "").casefold()
+        if operation == "open_application":
+            app = _clean_label(request.inputs.get("app"))
+            if not app:
+                raise ProviderFailed("application name is required")
+            await progress("open", f"Opening {app}.")
+            opened = await self._open_verified_app(app)
+            if (error := _tool_error(opened)) is not None:
+                raise ProviderFailed(error)
+            data = _tool_data(opened)
+            return CapabilityResult(
+                summary=f"Opened {data.get('name') or app}.",
+                data=data,
+            )
+
+        if operation == "open_website":
+            destination = _clean_label(request.inputs.get("destination"))
+            browser = _clean_label(request.inputs.get("browser")) or None
+            if not destination:
+                raise ProviderFailed("website destination is required")
+            await progress("open", f"Opening {destination}.")
+            opened = await self._open_verified_website(destination, browser)
+            if (error := _tool_error(opened)) is not None:
+                raise ProviderFailed(error)
+            data = _tool_data(opened)
+            return CapabilityResult(
+                summary=(
+                    f"Opened {data.get('destination') or destination} in "
+                    f"{data.get('browser') or browser or settings.preferred_browser}."
+                ),
+                data=data,
+            )
+
         if operation == "press_control":
             label = _clean_label(request.inputs.get("label"))
             if not label:
@@ -411,7 +599,7 @@ class ComputerControlProvider(CapabilityProvider):
         if direct:
             app, label = direct
             await progress("open", f"Opening {app}.")
-            opened = await self._call("open_app", {"app": app})
+            opened = await self._open_verified_app(app)
             error = _tool_error(opened)
             if error:
                 raise ProviderFailed(error)
@@ -421,7 +609,38 @@ class ComputerControlProvider(CapabilityProvider):
         if direct_label:
             return await self._press_named_control(None, direct_label, progress)
 
-        return await self._run_control_loop(request.goal, progress)
+        destination = destination_in_goal(request.goal)
+        initial_history: list[dict[str, Any]] = []
+        if destination:
+            browser = explicit_browser_in_goal(request.goal)
+            await progress("open", f"Opening {destination.name}.")
+            opened = await self._open_verified_website(destination.name, browser)
+            if (error := _tool_error(opened)) is not None:
+                raise ProviderFailed(error)
+            initial_history.append(
+                {
+                    "step": 0,
+                    "action": "open_url",
+                    "arguments": {
+                        "url": destination.url,
+                        "browser": browser or settings.preferred_browser,
+                    },
+                    "expected": (
+                        f"{destination.name} opens in "
+                        f"{browser or settings.preferred_browser}"
+                    ),
+                    "ok": True,
+                    "error": None,
+                    "observedChange": True,
+                    "result": _tool_data(opened),
+                }
+            )
+
+        return await self._run_control_loop(
+            request.goal,
+            progress,
+            initial_history=initial_history,
+        )
 
     async def _press_named_control(
         self,
@@ -510,15 +729,28 @@ class ComputerControlProvider(CapabilityProvider):
         self,
         goal: str,
         progress: ProgressCallback,
+        *,
+        initial_history: list[dict[str, Any]] | None = None,
     ) -> CapabilityResult:
         if not (settings.openai_api_key or "").strip():
             raise ProviderFailed(
                 "OPENAI_API_KEY is required for unfamiliar computer-control goals"
             )
-        history: list[dict[str, Any]] = []
+        history = list(initial_history or [])
         observation = await self._observe()
-        successful_actions = 0
+        successful_actions = sum(step.get("ok") is True for step in history)
         ineffective_actions: set[str] = set()
+        completed_open_actions = {
+            json.dumps(
+                [step.get("action"), step.get("arguments") or {}],
+                sort_keys=True,
+                default=str,
+            )
+            for step in history
+            if step.get("ok") is True
+            and step.get("action") in {"open_app", "open_url"}
+        }
+        wait_actions = sum(step.get("action") == "wait" for step in history)
         for step in range(1, MAX_CONTROL_STEPS + 1):
             await progress("plan", f"Planning computer step {step}.")
             decision = await self._planner(goal, observation, history)
@@ -548,18 +780,35 @@ class ComputerControlProvider(CapabilityProvider):
 
             await progress("act", f"Computer step {step}: {action.replace('_', ' ')}.")
             action_key = self._action_key(action, arguments, observation)
-            if action_key in ineffective_actions:
+            if action in {"open_app", "open_url"} and action_key in completed_open_actions:
+                result = {
+                    "ok": False,
+                    "error": "that destination is already open",
+                }
+            elif action == "wait" and wait_actions >= MAX_WAIT_ACTIONS:
+                result = {
+                    "ok": False,
+                    "error": "the wait limit was reached; choose an active control step",
+                }
+            elif action_key in ineffective_actions:
                 result = {
                     "ok": False,
                     "error": "that action already produced no observable change",
                 }
             else:
-                result = await self._execute_decision(action, arguments, observation)
+                result = await self._execute_decision(
+                    action,
+                    arguments,
+                    observation,
+                    goal,
+                )
             error = _tool_error(result)
             before = _observation_signature(observation)
             await asyncio.sleep(0.25)
             next_observation = await self._observe()
             changed = _observation_signature(next_observation) != before
+            if action == "wait":
+                wait_actions += 1
             if error is None and action not in {"wait", "open_app", "open_url"}:
                 if not changed and _tool_data(result).get("verifiedChange") is not True:
                     error = "the action produced no observable change"
@@ -568,6 +817,9 @@ class ComputerControlProvider(CapabilityProvider):
                     successful_actions += 1
             elif error is None and action in {"open_app", "open_url"}:
                 successful_actions += 1
+                completed_open_actions.add(action_key)
+            if error is None and action == "wait" and not changed:
+                ineffective_actions.add(action_key)
             history.append(
                 {
                     "step": step,
@@ -721,16 +973,34 @@ class ComputerControlProvider(CapabilityProvider):
         action: str,
         arguments: dict[str, Any],
         observation: dict[str, Any],
+        goal: str,
     ) -> dict[str, Any]:
         if action == "open_app":
-            return await self._call(
-                "open_app", {"app": str(arguments.get("app") or "")}
-            )
+            requested_app = str(arguments.get("app") or "")
+            destination = destination_in_goal(goal)
+            if destination:
+                required_browser = (
+                    explicit_browser_in_goal(goal) or settings.preferred_browser
+                )
+                requested_identity = resolve_application(requested_app)
+                required_identity = resolve_application(required_browser)
+                if requested_identity.bundle_id != required_identity.bundle_id:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"browser policy requires {required_identity.name} for "
+                            f"{destination.name}"
+                        ),
+                    }
+            return await self._open_verified_app(requested_app)
         if action == "open_url":
-            payload = {"url": str(arguments.get("url") or "")}
-            if arguments.get("browser"):
-                payload["browser"] = str(arguments["browser"])
-            return await self._call("open_url", payload)
+            required_browser = (
+                explicit_browser_in_goal(goal) or settings.preferred_browser
+            )
+            return await self._open_verified_website(
+                str(arguments.get("url") or ""),
+                required_browser,
+            )
         if action == "interact_ui":
             element_id = str(arguments.get("element_id") or "")
             current = {
@@ -776,6 +1046,106 @@ class ComputerControlProvider(CapabilityProvider):
             return {"ok": True, "data": {"waitedSeconds": value}}
         return {"ok": False, "error": f"unsupported computer action: {action}"}
 
+    async def _open_verified_app(self, requested: str) -> dict[str, Any]:
+        identity = resolve_application(requested)
+        opened = await self._call("open_app", {"app": identity.bundle_id})
+        if (error := _tool_error(opened)) is not None:
+            return {"ok": False, "error": error}
+
+        deadline = asyncio.get_running_loop().time() + APP_LAUNCH_TIMEOUT_SECONDS
+        latest: dict[str, Any] = {}
+        while asyncio.get_running_loop().time() < deadline:
+            screen = await self._call("observe_screen")
+            if _tool_error(screen) is None:
+                latest = _tool_data(screen)
+                if application_matches(
+                    identity,
+                    name=latest.get("app"),
+                    bundle_id=latest.get("bundleId"),
+                ):
+                    return {
+                        "ok": True,
+                        "data": {
+                            **_tool_data(opened),
+                            "name": identity.name,
+                            "requested": requested,
+                            "resolvedBundleId": identity.bundle_id,
+                            "frontmostApp": latest.get("app"),
+                            "frontmostBundleId": latest.get("bundleId"),
+                            "contract": "application_frontmost",
+                            "verified": True,
+                        },
+                    }
+            await asyncio.sleep(0.2)
+        return {
+            "ok": False,
+            "error": f"opened {identity.name}, but it did not become frontmost",
+            "data": {"lastObservation": latest},
+        }
+
+    async def _open_verified_website(
+        self,
+        requested: str,
+        browser: str | None,
+    ) -> dict[str, Any]:
+        destination = resolve_destination(requested)
+        if destination is None:
+            return {"ok": False, "error": f"unknown website destination: {requested}"}
+        browser_identity = resolve_application(browser or settings.preferred_browser)
+        opened = await self._call(
+            "open_url",
+            {
+                "url": destination.url,
+                "browser": browser_identity.bundle_id,
+            },
+        )
+        if (error := _tool_error(opened)) is not None:
+            return {"ok": False, "error": error}
+        opened_data = _tool_data(opened)
+        if not application_matches(
+            browser_identity,
+            name=opened_data.get("browser"),
+            bundle_id=opened_data.get("bundleId"),
+        ):
+            return {
+                "ok": False,
+                "error": "the website opened in the wrong browser",
+            }
+
+        deadline = asyncio.get_running_loop().time() + APP_LAUNCH_TIMEOUT_SECONDS
+        latest: dict[str, Any] = {}
+        while asyncio.get_running_loop().time() < deadline:
+            screen = await self._call("observe_screen")
+            if _tool_error(screen) is None:
+                latest = _tool_data(screen)
+                if application_matches(
+                    browser_identity,
+                    name=latest.get("app"),
+                    bundle_id=latest.get("bundleId"),
+                ):
+                    return {
+                        "ok": True,
+                        "data": {
+                            **opened_data,
+                            "destination": destination.name,
+                            "url": destination.url,
+                            "browser": browser_identity.name,
+                            "browserBundleId": browser_identity.bundle_id,
+                            "frontmostApp": latest.get("app"),
+                            "contract": "website_open_in_required_browser",
+                            "verified": True,
+                        },
+                    }
+            await asyncio.sleep(0.2)
+        return {
+            "ok": False,
+            "error": (
+                f"opened {destination.name}, but {browser_identity.name} did not "
+                "become frontmost"
+            ),
+            "data": {"lastObservation": latest},
+        }
+
     async def _call(
         self,
         tool: str,
@@ -797,7 +1167,8 @@ class ComputerControlProvider(CapabilityProvider):
         api_key = (settings.openai_api_key or "").strip()
         base_payload = {
             "store": False,
-            "max_output_tokens": 300,
+            "max_output_tokens": 800,
+            "text": {"format": PLANNER_OUTPUT_FORMAT},
             "input": [
                 {"role": "developer", "content": PLANNER_INSTRUCTIONS},
                 {

@@ -219,6 +219,18 @@ class RouteRequestTests(unittest.TestCase):
             {},
         )
 
+    def test_bare_stop_bypasses_the_model_and_cancels_friday_work(self) -> None:
+        for command in ("Stop", "Friday, stop that", "Cancel it", "Never mind"):
+            with self.subTest(command=command):
+                route = deterministic_tool_route(command, self.catalog)
+                self.assertIsNotNone(route)
+                assert route is not None
+                self.assertEqual(route.tool_name, "stop_current_work")
+                self.assertEqual(route.arguments, {})
+
+    def test_stop_music_remains_a_music_command(self) -> None:
+        self.assertIsNone(deterministic_tool_route("Stop the music", self.catalog))
+
     def test_forces_named_song_through_spotify(self) -> None:
         route = deterministic_tool_route(
             "Play Pink and White by Frank Ocean on Spotify.",

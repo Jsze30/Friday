@@ -17,6 +17,7 @@ from typing import Any
 
 import keyring
 
+from ..config import settings
 from .base import (
     ActionDefinition,
     ActionParameter,
@@ -42,6 +43,8 @@ KEYCHAIN_SERVICE = "com.friday.spotify.oauth"
 KEYCHAIN_ACCOUNT = "spotify"
 AUTHORIZATION_TIMEOUT_SECONDS = 5 * 60
 HTTP_TIMEOUT_SECONDS = 10
+PLAYBACK_VERIFY_ATTEMPTS = 8
+PLAYBACK_VERIFY_INTERVAL_SECONDS = 0.25
 
 
 class SpotifyAuthorizationRequired(ProviderFailed):
@@ -1090,7 +1093,12 @@ class SpotifyProvider(CapabilityProvider):
         self.client = client or SpotifyClient(client_id, redirect_uri)
 
     async def available(self) -> bool:
-        return self.client.configured
+        preferred = "".join(
+            character
+            for character in settings.preferred_music_provider.casefold()
+            if character.isalnum()
+        )
+        return self.client.configured and preferred in {"spotify", "spotifywebapi"}
 
     async def shutdown(self) -> None:
         await self.client.shutdown()
@@ -1167,21 +1175,57 @@ class SpotifyProvider(CapabilityProvider):
                 )
             if action == "play":
                 query = _music_query(request)
-                track = await self.client.play(query or None)
+                track: dict[str, Any] = {}
+                playback: dict[str, Any] | None = None
+                for attempt in range(2):
+                    track = await self.client.play(query or None)
+                    playback = await self._wait_for_playback(
+                        playing=True,
+                        expected_uri=track.get("uri") if track else None,
+                    )
+                    if playback is not None:
+                        break
+                    if attempt == 0:
+                        await progress(
+                            "retry",
+                            "Spotify did not confirm playback, so I am retrying.",
+                        )
+                if playback is None:
+                    raise ProviderFailed(
+                        "Spotify accepted the play command but did not start playback."
+                    )
                 if track:
                     return CapabilityResult(
                         summary=(f"Playing {track['name']} by {track['artist']}."),
-                        data={"action": action, "track": track},
+                        data={
+                            "action": action,
+                            "track": track,
+                            "verified": True,
+                            "playback": playback,
+                        },
                     )
                 return CapabilityResult(
                     summary="Resumed Spotify.",
-                    data={"action": action},
+                    data={
+                        "action": action,
+                        "verified": True,
+                        "playback": playback,
+                    },
                 )
             if action == "pause":
                 await self.client.pause()
+                playback = await self._wait_for_playback(playing=False)
+                if playback is None:
+                    raise ProviderFailed(
+                        "Spotify accepted the pause command but still reports playback."
+                    )
                 return CapabilityResult(
                     summary="Paused Spotify.",
-                    data={"action": action},
+                    data={
+                        "action": action,
+                        "verified": True,
+                        "playback": playback,
+                    },
                 )
             if action == "next":
                 await self.client.next()
@@ -1230,6 +1274,38 @@ class SpotifyProvider(CapabilityProvider):
         except SpotifyAuthorizationRequired:
             return await self._authorization_result()
         raise ProviderFailed(f"Unsupported Spotify action: {action}.")
+
+    async def verify(
+        self,
+        request: CapabilityRequest,
+        result: CapabilityResult,
+    ) -> tuple[bool, str | None]:
+        action = _music_action(request)
+        if action in {"play", "pause"} and result.data.get("verified") is not True:
+            return False, f"Spotify did not verify {action}"
+        return await super().verify(request, result)
+
+    async def _wait_for_playback(
+        self,
+        *,
+        playing: bool,
+        expected_uri: str | None = None,
+    ) -> dict[str, Any] | None:
+        for attempt in range(PLAYBACK_VERIFY_ATTEMPTS):
+            playback = await self.client.playback()
+            if not isinstance(playback, dict):
+                if not playing:
+                    return {"is_playing": False, "item": None}
+            else:
+                state_matches = bool(playback.get("is_playing")) is playing
+                item = playback.get("item")
+                actual_uri = item.get("uri") if isinstance(item, dict) else None
+                track_matches = expected_uri is None or actual_uri == expected_uri
+                if state_matches and track_matches:
+                    return playback
+            if attempt + 1 < PLAYBACK_VERIFY_ATTEMPTS:
+                await asyncio.sleep(PLAYBACK_VERIFY_INTERVAL_SECONDS)
+        return None
 
     async def _authorization_result(self) -> CapabilityResult:
         authorization = await self.client.begin_authorization()

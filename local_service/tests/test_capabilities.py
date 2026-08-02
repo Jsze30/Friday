@@ -311,6 +311,46 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["status"], "cancelled")
         await runtime.shutdown()
 
+    async def test_runtime_cancels_all_background_and_foreground_work(self) -> None:
+        provider = FakeProvider(
+            "slow",
+            priority=100,
+            result="too late",
+            delay=10,
+        )
+        provider.info = ProviderInfo(
+            provider_id="slow",
+            name="slow",
+            description="test provider",
+            capabilities=("test",),
+            actions=(
+                ActionDefinition(
+                    action_id="test.slow",
+                    capability="test",
+                    operation="slow",
+                    description="Run slowly.",
+                ),
+            ),
+            priority=100,
+        )
+        runtime = CapabilityRuntime(CapabilityBroker([provider]))
+        background = await runtime.start("test", "wait")
+        foreground = asyncio.create_task(
+            runtime.action("test.slow", "wait", {})
+        )
+        await asyncio.sleep(0)
+
+        stopped = await runtime.cancel_all()
+
+        self.assertEqual(stopped["cancelledCount"], 2)
+        self.assertEqual(stopped["actionCount"], 1)
+        self.assertEqual(
+            (await runtime.status(background["taskId"]))["status"],
+            "cancelled",
+        )
+        self.assertTrue(foreground.cancelled())
+        await runtime.shutdown()
+
     async def test_failed_task_keeps_all_provider_attempts(self) -> None:
         first = FakeProvider("first", priority=100, fail=True)
         second = FakeProvider("second", priority=50, fail=True)

@@ -7,6 +7,13 @@ from typing import Any
 
 log = logging.getLogger("friday-agent.actions")
 
+_REFERENCE_ARGUMENT_PATTERN = re.compile(
+    r"^(?:it|this|that|there|here|the\s+(?:app|application|page|site|"
+    r"website|tab|window|file|folder|song|track|playlist|project|repo|repository|"
+    r"document))$",
+    re.IGNORECASE,
+)
+
 _MULTI_ACTION_PATTERN = re.compile(
     r"\b(?:and|then|after\s+that|followed\s+by)\s+"
     r"(?:open|close|quit|play|pause|press|click|select|choose|type|scroll|"
@@ -41,6 +48,37 @@ def _command_text(text: str | None) -> str:
         flags=re.IGNORECASE,
     )
     return command.rstrip(".!?").strip()
+
+
+def action_arguments_need_resolution(
+    arguments: dict[str, Any],
+    resolutions: list[dict[str, Any]] | None = None,
+) -> bool:
+    raw_values = {
+        value.strip().casefold()
+        for value in arguments.values()
+        if isinstance(value, str)
+    }
+    if any(_REFERENCE_ARGUMENT_PATTERN.fullmatch(value) for value in raw_values):
+        return True
+    values = {
+        re.sub(
+            r"^(?:the|this|that)\s+", "", value.strip(), flags=re.IGNORECASE
+        ).casefold()
+        for value in arguments.values()
+        if isinstance(value, str)
+    }
+    resolution_phrases = {
+        re.sub(
+            r"^(?:the|this|that)\s+",
+            "",
+            str(resolution.get("phrase") or "").strip(),
+            flags=re.IGNORECASE,
+        ).casefold()
+        for resolution in resolutions or []
+        if isinstance(resolution, dict)
+    }
+    return bool(values & resolution_phrases)
 
 
 def merge_action_manifests(

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from action_catalog import ActionCatalog, merge_action_manifests
+from action_catalog import (
+    ActionCatalog,
+    action_arguments_need_resolution,
+    merge_action_manifests,
+)
 
 
 class ActionCatalogTests(unittest.TestCase):
@@ -179,6 +183,52 @@ class ActionCatalogTests(unittest.TestCase):
         self.assertEqual(match.action_id, "music.play_playlist")
         self.assertEqual(match.arguments, {"playlist": "road trip"})
 
+    def test_known_website_route_wins_over_generic_open_app(self) -> None:
+        catalog = ActionCatalog(
+            [
+                {
+                    "id": "system.open_application",
+                    "target": {"kind": "capability", "action": "open_application"},
+                    "parameters": [{"name": "app", "type": "string", "required": True}],
+                    "routes": [{"pattern": (r"(?:open|launch)\s+(?P<app>[\w .'-]+)")}],
+                    "priority": 190,
+                },
+                {
+                    "id": "browser.open_website",
+                    "target": {"kind": "capability", "action": "open_website"},
+                    "parameters": [
+                        {
+                            "name": "destination",
+                            "type": "string",
+                            "required": True,
+                        },
+                        {
+                            "name": "browser",
+                            "type": "string",
+                            "required": False,
+                        },
+                    ],
+                    "routes": [
+                        {
+                            "pattern": (
+                                r"open\s+(?:youtube|you\s+tube)"
+                                r"(?:\s+in\s+(?P<browser>[\w .'-]+))?"
+                            ),
+                            "arguments": {"destination": "YouTube"},
+                        }
+                    ],
+                    "priority": 250,
+                },
+            ]
+        )
+
+        match = catalog.match("Open YouTube.")
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.action_id, "browser.open_website")
+        self.assertEqual(match.arguments, {"destination": "YouTube"})
+
     def test_fixed_boolean_arguments_are_preserved(self) -> None:
         catalog = ActionCatalog(
             [
@@ -210,6 +260,12 @@ class ActionCatalogTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.arguments, {"enabled": False})
+
+    def test_only_referential_action_arguments_require_context_resolution(self) -> None:
+        self.assertFalse(action_arguments_need_resolution({"app": "Minecraft"}))
+        self.assertFalse(action_arguments_need_resolution({"destination": "YouTube"}))
+        self.assertTrue(action_arguments_need_resolution({"app": "the app"}))
+        self.assertTrue(action_arguments_need_resolution({"query": "that"}))
 
 
 if __name__ == "__main__":

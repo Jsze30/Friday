@@ -29,11 +29,17 @@ from livekit.agents.beta.toolsets import ToolProxyToolset
 from livekit.plugins import anthropic, deepgram, openai, silero
 from openai.types import Reasoning as OpenAIReasoning
 
-from action_catalog import ActionCatalog, merge_action_manifests
+from action_catalog import (
+    ActionCatalog,
+    action_arguments_need_resolution,
+    merge_action_manifests,
+)
 from action_tool import build_action_tool
 from capability_tool import build_capability_tool
 from hud import HudPublisher
 from model_router import DeterministicToolRoute, deterministic_tool_route, route_request
+from stop_command import is_stop_command
+from stop_tool import build_stop_tool
 from turn_gate import PreRollAudioInput, PreRollReceiver
 
 FOLLOWUP_SECONDS = 5.0
@@ -100,6 +106,8 @@ Important mappings and workflows:
 - For a goal that requires several steps inside one or more apps, use capability
   computer. Give it the complete outcome, such as "open Minecraft and press
   Play." Do not split the goal into a single open_app action and stop early.
+- A bare "stop", "cancel", "abort", or "never mind" means stop Friday's current
+  work immediately. It does not mean pause music unless the user mentions music.
 - Prefer a registered action over UI inspection, AppleScript, or a generic
   capability whenever the action catalog supports the request.
 - For current weather, use the ambient latitude and longitude with fetch_url and
@@ -222,9 +230,7 @@ class FridayAgent(Agent):
         if self._turn_context_provider is None or not new_message.text_content:
             return
         context_timeout = (
-            9.0
-            if VISUAL_CONTEXT_PATTERN.search(new_message.text_content)
-            else 0.35
+            9.0 if VISUAL_CONTEXT_PATTERN.search(new_message.text_content) else 0.35
         )
         try:
             context = await asyncio.wait_for(
@@ -245,9 +251,7 @@ class FridayAgent(Agent):
             turn_ctx.add_message(
                 role="system",
                 content=(
-                    "<working_context>\n"
-                    + encoded_context
-                    + "\n</working_context>\n"
+                    "<working_context>\n" + encoded_context + "\n</working_context>\n"
                     "Use this only for the current request. Prefer explicit saved "
                     "reference resolutions over guesses. If the context is still "
                     "ambiguous, ask one short question."
@@ -352,7 +356,17 @@ class FridayAgent(Agent):
         action = route.arguments.get("action")
         if isinstance(action, str) and action.startswith("context."):
             return route
-        return None
+        arguments_json = route.arguments.get("arguments_json")
+        try:
+            arguments = json.loads(arguments_json) if arguments_json else {}
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(arguments, dict) or action_arguments_need_resolution(
+            arguments,
+            self._current_turn_context.get("resolutions"),
+        ):
+            return None
+        return route
 
     async def llm_node(
         self,
@@ -602,6 +616,38 @@ async def entrypoint(ctx: JobContext) -> None:
     def emit_hud(event_type: str, payload: dict[str, Any]) -> None:
         hud.emit(event_type, **payload)
 
+    stop_lock = asyncio.Lock()
+    last_stop_at = 0.0
+    last_stop_result: dict[str, Any] = {}
+
+    async def cancel_active_work() -> dict[str, Any]:
+        nonlocal last_stop_at, last_stop_result
+        async with stop_lock:
+            now = asyncio.get_running_loop().time()
+            if now - last_stop_at < 1.0 and last_stop_result:
+                return last_stop_result
+            raw = await rpc_to_mac(
+                "capability_call",
+                json.dumps({"operation": "cancel_all"}),
+            )
+            try:
+                result = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                result = {}
+            if not isinstance(result, dict) or not result.get("ok"):
+                result = {
+                    "ok": False,
+                    "error": "Friday could not reach the local action runner.",
+                }
+            last_stop_at = now
+            last_stop_result = result
+            logger.info(
+                "stop_current_work cancelled=%s ok=%s",
+                result.get("cancelledCount", 0),
+                result.get("ok"),
+            )
+            return result
+
     async def fetch_turn_context(query: str) -> dict[str, Any]:
         raw = await rpc_to_mac(
             "get_turn_context",
@@ -691,11 +737,27 @@ async def entrypoint(ctx: JobContext) -> None:
         return _proxy
 
     async def fetch_tools() -> tuple[list, list[dict[str, Any]]]:
-        envelope = await call_tool("__list__", {}, startup=True)
-        if not envelope.get("ok"):
-            logger.warning("tool list fetch failed: %s", envelope.get("error"))
-            return [], []
-        manifests = (envelope.get("data") or {}).get("tools") or []
+        manifests: list[dict[str, Any]] = []
+        for manifest_tool in ("__list__", "__list_native__"):
+            cursor: int | None = 0
+            while cursor is not None:
+                envelope = await call_tool(
+                    manifest_tool,
+                    {"cursor": cursor, "limit": 3},
+                    startup=True,
+                )
+                if not envelope.get("ok"):
+                    logger.warning(
+                        "tool list fetch failed source=%s error=%s",
+                        manifest_tool,
+                        envelope.get("error"),
+                    )
+                    return [], []
+                data = envelope.get("data") or {}
+                page = data.get("tools") or []
+                manifests.extend(item for item in page if isinstance(item, dict))
+                next_cursor = data.get("nextCursor")
+                cursor = next_cursor if isinstance(next_cursor, int) else None
         built = []
         for m in manifests:
             try:
@@ -762,10 +824,12 @@ async def entrypoint(ctx: JobContext) -> None:
         action_catalog,
         event_sink=emit_hud,
     )
+    stop_tool = build_stop_tool(cancel_active_work, event_sink=emit_hud)
     fallback_tools = primitive_tools
     tools_list: list[llm.Tool | llm.Toolset] = [
         action_tool,
         capability_tool,
+        stop_tool,
     ]
     if fallback_tools:
         tools_list.append(
@@ -912,13 +976,16 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_user_input(ev) -> None:
         cancel_followup()
         transcript = str(getattr(ev, "transcript", "") or "")
+        is_final = bool(getattr(ev, "is_final", False))
         if transcript:
             hud.emit(
                 "transcript",
                 role="user",
                 text=transcript,
-                isFinal=bool(getattr(ev, "is_final", False)),
+                isFinal=is_final,
             )
+        if is_final and is_stop_command(transcript):
+            asyncio.create_task(cancel_active_work())
 
     @session.on("conversation_item_added")
     def _on_conversation_item(ev) -> None:

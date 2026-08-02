@@ -4,7 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from livekit.agents import RunContext, function_tool
+from livekit.agents import RunContext, function_tool, llm
 
 from action_catalog import ActionCatalog
 from capability_tool import RpcCall, _decode
@@ -49,6 +49,7 @@ def build_action_tool(
             f"catalog. Available actions: {available}. Pass only arguments "
             "declared by that action as one JSON object string."
         ),
+        flags=llm.ToolFlag.CANCELLABLE,
     )
     async def run_action(
         context: RunContext,
@@ -68,9 +69,6 @@ def build_action_tool(
         normalized = catalog.normalize_arguments(action, arguments)
         if normalized is None:
             return f"Invalid arguments for {action}."
-        if manifest.get("permission") != "read_only":
-            context.disallow_interruptions()
-
         if event_sink:
             event_sink(
                 "action_started",

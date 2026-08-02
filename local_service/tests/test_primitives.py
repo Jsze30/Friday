@@ -39,6 +39,25 @@ class PrimitiveToolTests(unittest.TestCase):
             },
         )
 
+    def test_registry_manifest_can_be_paged_for_livekit_rpc(self) -> None:
+        first = asyncio.run(
+            tools.execute("__list__", {"cursor": 0, "limit": 3})
+        )
+        second = asyncio.run(
+            tools.execute(
+                "__list__",
+                {"cursor": first["data"]["nextCursor"], "limit": 3},
+            )
+        )
+
+        self.assertEqual(len(first["data"]["tools"]), 3)
+        self.assertEqual(len(second["data"]["tools"]), 3)
+        self.assertNotEqual(
+            first["data"]["tools"][0]["name"],
+            second["data"]["tools"][0]["name"],
+        )
+        self.assertEqual(first["data"]["total"], len(tools.REGISTRY))
+
     def test_write_executes_immediately(self) -> None:
         local_service_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=local_service_root) as temporary:

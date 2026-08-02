@@ -72,6 +72,8 @@ async def execute(payload: dict[str, Any]) -> dict[str, Any]:
         )
     if operation == "cancel":
         return await runtime.cancel(str(payload.get("taskId") or ""))
+    if operation == "cancel_all":
+        return await runtime.cancel_all()
     return {"ok": False, "error": "unknown capability operation"}
 
 
